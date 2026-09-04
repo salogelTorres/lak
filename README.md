@@ -129,14 +129,23 @@ OpenRouter, proxies, etc.), running in Docker.
   reasonable default on CPU. Every transcription is prefixed with
   `[Voice message, transcribed by Whisper]:` before being sent to the
   model, so it can tell text and voice messages apart.
-- **Conversation memory**: `MAX_HISTORY_TOKENS` in `.env` (default `2000`)
+- **Conversation memory**: `MAX_HISTORY_TOKENS` in `.env` (default `3000`)
   caps how much prior conversation gets sent with each message — a token
   budget (~4 chars/token estimate), not a fixed number of messages, so a
-  few long messages and many short ones are trimmed consistently. Oldest
-  messages are dropped first; the system prompt and your latest message are
-  always kept. Lower this if you're on a small local context window,
-  raise it if your model/API supports a much larger one. History itself is
-  in-memory only and resets when the bot restarts.
+  few long messages and many short ones are trimmed consistently. Your
+  latest message is always kept even if it alone exceeds the budget.
+  Instead of just dropping old messages once that budget is exceeded, the
+  bot **compacts** them: `RECENT_HISTORY_TOKENS` (default `500`) worth of
+  the newest messages stay verbatim, and everything older than that gets
+  summarized by the LLM into a running summary (folded into the system
+  prompt) rather than lost outright. This costs one extra LLM call, only
+  when it's actually needed (not on every message), so the bot sends a
+  Telegram notice ("compacting older conversation history...") right
+  before it happens. If that summarization call itself fails, it falls
+  back to just dropping the oldest messages instead. Lower `MAX_HISTORY_TOKENS`
+  if you're on a small local context window, raise it if your model/API
+  supports a much larger one. History itself is in-memory only and resets
+  when the bot restarts.
 
 `.env`, `app/prompts/system_prompt.txt`, and `docker-compose.override.yml`
 are all gitignored — see

@@ -29,7 +29,8 @@ def test_load_defaults(monkeypatch, tmp_path):
     assert config.cloud_api_key == ""
     assert config.cloud_model == "gpt-4o-mini"
     assert config.whisper_model == "small"
-    assert config.max_history_tokens == 2000
+    assert config.max_history_tokens == 3000
+    assert config.recent_history_tokens == 500
 
 
 def test_load_custom_values(monkeypatch, tmp_path):
@@ -45,6 +46,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     monkeypatch.setenv("TZ", "Europe/Madrid")
     monkeypatch.setenv("WHISPER_MODEL", "medium")
     monkeypatch.setenv("MAX_HISTORY_TOKENS", "8000")
+    monkeypatch.setenv("RECENT_HISTORY_TOKENS", "1000")
 
     config = Config.load()
 
@@ -56,6 +58,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     assert config.timezone == "Europe/Madrid"
     assert config.whisper_model == "medium"
     assert config.max_history_tokens == 8000
+    assert config.recent_history_tokens == 1000
 
 
 def test_load_invalid_max_history_tokens(monkeypatch):
@@ -63,6 +66,14 @@ def test_load_invalid_max_history_tokens(monkeypatch):
     monkeypatch.setenv("MAX_HISTORY_TOKENS", "not-a-number")
 
     with pytest.raises(RuntimeError, match="Invalid MAX_HISTORY_TOKENS"):
+        Config.load()
+
+
+def test_load_invalid_recent_history_tokens(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("RECENT_HISTORY_TOKENS", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="Invalid RECENT_HISTORY_TOKENS"):
         Config.load()
 
 

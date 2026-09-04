@@ -9,11 +9,15 @@ from telegram.ext import CommandHandler, MessageHandler
 
 import app.bot as bot_module
 from app.bot import (
+    COMPACTING_NOTICE,
+    COMPACTION_SYSTEM_PROMPT,
     VOICE_TRANSCRIPTION_PREFIX,
     _build_system_message,
+    _compact_history,
     _estimate_tokens,
     _get_whisper_model,
     _is_allowed,
+    _split_recent,
     _transcribe_sync,
     _trim_to_token_budget,
     _warm_up_ollama,
@@ -59,6 +63,7 @@ def make_config(**overrides) -> Config:
         cloud_model="gpt-4o-mini",
         whisper_model="small",
         max_history_tokens=2000,
+        recent_history_tokens=500,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -164,6 +169,23 @@ def test_build_system_message_falls_back_to_utc_for_unknown_timezone():
     message = _build_system_message(config)
 
     assert "(UTC)" in message["content"]
+
+
+def test_build_system_message_includes_summary_when_present(monkeypatch):
+    config = make_config(system_prompt="You are Rex.", timezone="UTC")
+
+    message = _build_system_message(config, summary="The user's name is Luis.")
+
+    assert "Summary of earlier conversation" in message["content"]
+    assert "The user's name is Luis." in message["content"]
+
+
+def test_build_system_message_omits_summary_section_when_empty():
+    config = make_config(system_prompt="You are Rex.", timezone="UTC")
+
+    message = _build_system_message(config, summary="")
+
+    assert "Summary of earlier conversation" not in message["content"]
 
 
 def test_build_system_message_refreshes_between_calls(monkeypatch):
@@ -460,6 +482,168 @@ def test_trim_to_token_budget_with_only_a_system_message():
     history = [_msg("system", "sys")]
 
     assert _trim_to_token_budget(history, max_tokens=1000) == history
+
+
+def test_split_recent_keeps_everything_as_recent_when_it_fits():
+    messages = [_msg("user", "a" * 8), _msg("assistant", "b" * 8)]
+
+    older, recent = _split_recent(messages, recent_tokens=1000)
+
+    assert older == []
+    assert recent == messages
+
+
+def test_split_recent_with_no_messages():
+    assert _split_recent([], recent_tokens=1000) == ([], [])
+
+
+def test_split_recent_always_keeps_at_least_the_newest_message():
+    messages = [_msg("user", "a" * 40), _msg("assistant", "b" * 4000)]
+
+    older, recent = _split_recent(messages, recent_tokens=1)
+
+    assert recent == [messages[-1]]
+    assert older == messages[:-1]
+
+
+def test_split_recent_puts_oldest_messages_into_older_regardless_of_count():
+    messages = [
+        _msg("user", "a" * 4000),  # huge, oldest
+        _msg("assistant", "b" * 8),
+        _msg("user", "c" * 8),  # newest
+    ]
+
+    older, recent = _split_recent(messages, recent_tokens=10)
+
+    assert older == [messages[0]]
+    assert recent == messages[1:]
+
+
+async def test_compact_history_summarizes_messages_without_existing_summary():
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "  A concise summary.  "
+    messages = [_msg("user", "hi"), _msg("assistant", "hello there")]
+
+    summary = await _compact_history(llm_client, "", messages)
+
+    assert summary == "A concise summary."
+    sent = llm_client.chat.call_args.args[0]
+    assert sent[0] == {"role": "system", "content": COMPACTION_SYSTEM_PROMPT}
+    assert "Existing summary" not in sent[1]["content"]
+    assert "user: hi" in sent[1]["content"]
+    assert "assistant: hello there" in sent[1]["content"]
+
+
+async def test_compact_history_folds_in_existing_summary():
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "Updated summary."
+    messages = [_msg("user", "what's my name?")]
+
+    await _compact_history(llm_client, "The user's name is Luis.", messages)
+
+    sent = llm_client.chat.call_args.args[0]
+    assert "Existing summary:\nThe user's name is Luis." in sent[1]["content"]
+    assert "New messages to fold in:" in sent[1]["content"]
+
+
+async def test_handle_message_compacts_older_history_once_over_budget(monkeypatch):
+    fixed = datetime(2026, 9, 4, 20, 30)
+    freeze_now(monkeypatch, fixed)
+    # Small enough that a handful of messages push it over budget, with a
+    # recent window tight enough that some of them fall outside it.
+    config = make_config(max_history_tokens=15, recent_history_tokens=5)
+
+    def fake_chat(messages):
+        if messages[0]["content"] == COMPACTION_SYSTEM_PROMPT:
+            return "Summary: talked about the weather."
+        return "reply"
+
+    llm_client = AsyncMock()
+    llm_client.chat = AsyncMock(side_effect=fake_chat)
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    updates = []
+    for i in range(5):
+        update = make_update(text=f"message number {i}" * 3)
+        updates.append(update)
+        await handle_message(update, make_context())
+
+    # The compaction notice went out on at least one of these turns.
+    notices = [
+        call.args[0]
+        for update in updates
+        for call in update.message.reply_text.await_args_list
+        if call.args and call.args[0] == COMPACTING_NOTICE
+    ]
+    assert notices
+
+    # The next turn's system message carries the summary forward.
+    another_update = make_update(text="one more")
+    await handle_message(another_update, make_context())
+    system_content = llm_client.chat.call_args_list[-1].args[0][0]["content"]
+    assert "talked about the weather" in system_content
+
+
+async def test_handle_message_falls_back_to_trimming_when_compaction_fails(monkeypatch, caplog):
+    fixed = datetime(2026, 9, 4, 20, 30)
+    freeze_now(monkeypatch, fixed)
+    config = make_config(max_history_tokens=15, recent_history_tokens=5)
+
+    def fake_chat(messages):
+        if messages[0]["content"] == COMPACTION_SYSTEM_PROMPT:
+            raise RuntimeError("boom")
+        return "reply"
+
+    llm_client = AsyncMock()
+    llm_client.chat = AsyncMock(side_effect=fake_chat)
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    with caplog.at_level(logging.ERROR, logger="app.bot"):
+        for i in range(5):
+            update = make_update(text=f"message number {i}" * 3)
+            await handle_message(update, make_context())
+
+    assert "compacting" in caplog.text.lower()
+    # The bot still replied normally despite the compaction failure.
+    update.message.reply_text.assert_awaited_with("reply")
+
+
+async def test_handle_message_does_not_compact_when_recent_window_covers_everything():
+    config = make_config(max_history_tokens=10, recent_history_tokens=10_000)
+    llm_client, calls = make_recording_llm_client([f"reply-{i}" for i in range(5)])
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    updates = []
+    for i in range(5):
+        update = make_update(text=f"message number {i}")
+        updates.append(update)
+        await handle_message(update, make_context())
+
+    assert all(
+        call.args[0] != COMPACTING_NOTICE
+        for update in updates
+        for call in update.message.reply_text.await_args_list
+    )
+    assert all(m["role"] != "system" or COMPACTION_SYSTEM_PROMPT not in m["content"] for m in calls[-1])
+
+
+async def test_handle_message_over_budget_with_nothing_old_enough_to_compact():
+    # over budget, but the recent window alone already covers every message
+    # (older is empty) — must fall straight through to the plain trim
+    # without ever attempting compaction.
+    config = make_config(max_history_tokens=0, recent_history_tokens=10_000)
+    llm_client, calls = make_recording_llm_client(["ok"])
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    update = make_update(text="hi")
+    await handle_message(update, make_context())
+
+    assert all(call.args[0] != COMPACTING_NOTICE for call in update.message.reply_text.await_args_list)
+    update.message.reply_text.assert_awaited_with("ok")
 
 
 async def test_handle_message_trims_by_token_budget_not_message_count(monkeypatch):

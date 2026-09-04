@@ -91,15 +91,29 @@ required.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or
-  persisted store. It's capped by `_trim_to_token_budget()` against
+  persisted store — alongside a second `dict[chat_id, str]` holding each
+  chat's running summary. It's capped by `_trim_to_token_budget()` against
   `Config.max_history_tokens` (a rough ~4-chars/token estimate, not a real
-  tokenizer — see `_estimate_tokens`), dropping the *oldest* messages first
-  regardless of how many that is; the system message and the newest message
-  are always kept even if the newest alone exceeds budget. Trimming happens
-  *before* the LLM call in `_reply_to()`, so it bounds what's actually sent,
-  not just what's stored. This replaced an earlier fixed 20-message cap —
-  don't reintroduce a message-count limit; a handful of long messages can
-  blow a context window just as easily as many short ones. `handle_message`
+  tokenizer — see `_estimate_tokens`) as a last-resort safety net, dropping
+  the *oldest* messages first regardless of how many that is; the system
+  message and the newest message are always kept even if the newest alone
+  exceeds budget. This replaced an earlier fixed 20-message cap — don't
+  reintroduce a message-count limit; a handful of long messages can blow a
+  context window just as easily as many short ones. Before that safety net
+  kicks in, `_reply_to()` prefers **compaction** over dropping: once total
+  history exceeds `max_history_tokens`, `_split_recent()` peels off
+  everything older than the trailing `Config.recent_history_tokens`, and
+  `_compact_history()` asks the LLM to fold those older messages (plus any
+  existing summary) into an updated short summary, which
+  `_build_system_message()` then appends to the system prompt instead of the
+  raw messages. This is a batch operation — it only fires once the "older"
+  bucket is non-empty, not on every message near the threshold — and a
+  Telegram notice (`COMPACTING_NOTICE`) goes out first since it's an extra
+  LLM call. If that call fails, the exception is swallowed (logged) and
+  `_trim_to_token_budget()` falls back to plain dropping for that turn, so a
+  broken compaction never breaks the actual reply. Trimming happens *before*
+  the LLM call in `_reply_to()`, so it bounds what's actually sent, not just
+  what's stored. `handle_message`
   (text) and `handle_voice` (voice notes/audio files) both funnel through the
   shared `_reply_to()` closure (access control, history, typing indicator,
   LLM call, error handling, trimming) — add new input types the same way

@@ -30,6 +30,15 @@ CHARS_PER_TOKEN_ESTIMATE = 4
 # sent" is meaningless to it, since it only ever sees text.
 VOICE_TRANSCRIPTION_PREFIX = "[Voice message, transcribed by Whisper]"
 
+COMPACTING_NOTICE = "One moment — compacting older conversation history to keep things running smoothly..."
+
+COMPACTION_SYSTEM_PROMPT = (
+    "You are compacting the history of an ongoing conversation between a user and an "
+    "assistant, to save space. Write a concise summary that preserves important facts, "
+    "names, decisions, and unresolved questions. Reply with the summary text only, "
+    "nothing else."
+)
+
 WHISPER_DOWNLOAD_ROOT = "/data/whisper"
 
 _whisper_models: dict[str, WhisperModel] = {}
@@ -97,7 +106,52 @@ def _trim_to_token_budget(history: list[dict[str, str]], max_tokens: int) -> lis
     return [system_message, *kept]
 
 
-def _build_system_message(config: Config) -> dict[str, str]:
+def _split_recent(messages: list[dict[str, str]], recent_tokens: int) -> tuple[list[dict], list[dict]]:
+    """Split messages into (older, recent): recent is the newest messages
+    whose combined size fits within recent_tokens (always includes at least
+    the last message), older is everything before that — candidates for
+    compaction rather than being sent to the model verbatim.
+    """
+    if not messages:
+        return [], []
+
+    recent = [messages[-1]]
+    budget = recent_tokens - _estimate_tokens(messages[-1]["content"])
+    for message in reversed(messages[:-1]):
+        cost = _estimate_tokens(message["content"])
+        if cost > budget:
+            break
+        recent.append(message)
+        budget -= cost
+
+    recent.reverse()
+    older = messages[: len(messages) - len(recent)]
+    return older, recent
+
+
+async def _compact_history(llm_client: LLMClient, existing_summary: str, messages: list[dict[str, str]]) -> str:
+    """Summarize `messages` (folding in `existing_summary`, if any) into a
+    single short paragraph, via the same LLM used for replies.
+
+    Called instead of just dropping old messages once the token budget is
+    exceeded, so older context isn't lost outright — just condensed.
+    """
+    conversation = "\n".join(f"{message['role']}: {message['content']}" for message in messages)
+    user_content = (
+        f"Existing summary:\n{existing_summary}\n\nNew messages to fold in:\n{conversation}"
+        if existing_summary
+        else conversation
+    )
+    reply = await llm_client.chat(
+        [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+    )
+    return reply.strip()
+
+
+def _build_system_message(config: Config, summary: str = "") -> dict[str, str]:
     """Recomputed on every message so the date/time is never stale, unlike
     the rest of the system prompt, which is fixed for the process lifetime.
     """
@@ -108,7 +162,10 @@ def _build_system_message(config: Config) -> dict[str, str]:
         tz_name = "UTC"
         now = datetime.now(ZoneInfo(tz_name))
     datetime_line = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
-    return {"role": "system", "content": f"{config.system_prompt}\n\n{datetime_line}"}
+    content = f"{config.system_prompt}\n\n{datetime_line}"
+    if summary:
+        content += f"\n\nSummary of earlier conversation (compacted to save space): {summary}"
+    return {"role": "system", "content": content}
 
 
 async def _warm_up_ollama(llm_client: LLMClient, *, retries: int = 10, delay_seconds: float = 3) -> None:
@@ -150,8 +207,10 @@ async def _keep_typing(bot, chat_id: int) -> None:
 
 
 def build_application(config: Config, llm_client: LLMClient) -> Application:
-    # per-chat conversation history, kept in memory only (reset on restart)
+    # per-chat conversation history and running summary, kept in memory only
+    # (reset on restart)
     histories: dict[int, list[dict[str, str]]] = {}
+    summaries: dict[int, str] = {}
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Hi, I'm {config.agent_name}. How can I help?")
@@ -166,25 +225,44 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
     async def _reply_to(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         chat_id = update.effective_chat.id
         history = histories.setdefault(chat_id, [None])
-        history[0] = _build_system_message(config)
         history.append({"role": "user", "content": text})
-        # bound what we're about to send *before* sending it, not after —
-        # trims oldest messages first, whatever number of them that is
-        history = _trim_to_token_budget(history, config.max_history_tokens)
-        histories[chat_id] = history
 
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
         try:
-            reply = await llm_client.chat(history)
-        except Exception:
-            logger.exception("Failed calling the LLM")
-            await update.message.reply_text("Something went wrong talking to the model. Please try again.")
-            return
+            messages = history[1:]
+            over_budget = sum(_estimate_tokens(m["content"]) for m in messages) > config.max_history_tokens
+            if over_budget:
+                older, recent = _split_recent(messages, config.recent_history_tokens)
+                if older:
+                    # Compacting means an extra LLM call before the real
+                    # reply, so let the user know why this one is slower.
+                    await update.message.reply_text(COMPACTING_NOTICE)
+                    try:
+                        summaries[chat_id] = await _compact_history(llm_client, summaries.get(chat_id, ""), older)
+                        history[1:] = recent
+                    except Exception:
+                        # Compaction failed — fall through to the plain
+                        # token-budget trim below as a safety net; older
+                        # messages get dropped like before instead of kept.
+                        logger.exception("Failed compacting conversation history")
+
+            history[0] = _build_system_message(config, summaries.get(chat_id, ""))
+            # bound what we're about to send *before* sending it, not after —
+            # trims oldest messages first, whatever number of them that is
+            history = _trim_to_token_budget(history, config.max_history_tokens)
+
+            try:
+                reply = await llm_client.chat(history)
+            except Exception:
+                logger.exception("Failed calling the LLM")
+                await update.message.reply_text("Something went wrong talking to the model. Please try again.")
+                return
         finally:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await typing_task
 
+        histories[chat_id] = history
         history.append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
 

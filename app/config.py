@@ -13,6 +13,14 @@ def _split_ids(raw: str) -> set[int]:
     return {int(x) for x in raw.split(",") if x.strip()}
 
 
+def _parse_int_env(name: str, default: str) -> int:
+    raw = os.environ.get(name, default).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(f"Invalid {name}: {raw!r} (must be a whole number)")
+
+
 @dataclass
 class Config:
     telegram_token: str
@@ -28,6 +36,7 @@ class Config:
     cloud_model: str
     whisper_model: str
     max_history_tokens: int
+    recent_history_tokens: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -47,13 +56,8 @@ class Config:
         if backend not in {"ollama", "cloud"}:
             raise RuntimeError(f"Invalid LLM_BACKEND: {backend!r} (use 'ollama' or 'cloud')")
 
-        raw_max_history_tokens = os.environ.get("MAX_HISTORY_TOKENS", "2000").strip()
-        try:
-            max_history_tokens = int(raw_max_history_tokens)
-        except ValueError:
-            raise RuntimeError(
-                f"Invalid MAX_HISTORY_TOKENS: {raw_max_history_tokens!r} (must be a whole number)"
-            )
+        max_history_tokens = _parse_int_env("MAX_HISTORY_TOKENS", "3000")
+        recent_history_tokens = _parse_int_env("RECENT_HISTORY_TOKENS", "500")
 
         return cls(
             telegram_token=token,
@@ -69,4 +73,5 @@ class Config:
             cloud_model=os.environ.get("CLOUD_MODEL", "gpt-4o-mini"),
             whisper_model=os.environ.get("WHISPER_MODEL", "small"),
             max_history_tokens=max_history_tokens,
+            recent_history_tokens=recent_history_tokens,
         )
