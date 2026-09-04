@@ -86,8 +86,38 @@ required.
   `{{AGENT_NAME}}` placeholder in the system prompt at load time.
 - `llm.py` — `LLMClient` Protocol with `OllamaClient` and `CloudClient`
   (any OpenAI-compatible `/chat/completions` endpoint); `build_llm_client()`
-  picks one from `Config.llm_backend`. Both are thin `httpx` wrappers with no
-  retry/streaming logic.
+  picks one from `Config.llm_backend`. Both are thin `httpx` wrappers (via
+  the shared `_post_json()` helper) with no retry/streaming logic. Each
+  implements `chat()` as a thin per-backend `complete()` closure (shapes its
+  own request payload/endpoint) handed to the shared `_run_with_tools()`
+  loop, which is what actually knows how to run tool calls — up to
+  `MAX_TOOL_ROUNDS` rounds, forcing a final tools-withheld round so a model
+  that won't stop requesting tools can't loop forever. Ollama's `/api/chat`
+  and OpenAI-compatible `/chat/completions` both speak the same
+  `tool_calls`/`role: "tool"` shape, which is what makes one shared loop
+  possible instead of duplicating it per backend. Tool execution itself
+  (`_call_tool()`) runs the matched `Tool.execute` via `asyncio.to_thread`
+  (tools are sync, may block on network I/O) and never lets a tool's
+  exception escape to the model — it becomes a `"...tool failed to run"`
+  message instead, same philosophy as the rest of the bot: a broken
+  side-capability shouldn't break the conversation.
+- `tools/` — the catalog of capabilities an agent *can* use, entirely
+  separate from which ones it *does*: nothing here is wired into an agent by
+  default. `tools/base.py` defines `Tool` (name, description, JSON-schema
+  `parameters`, sync `execute`); each tool is its own module (e.g.
+  `tools/web_search.py`) exporting a `TOOL` instance, registered in
+  `tools/__init__.py`'s `AVAILABLE_TOOLS`. An agent opts in per tool via
+  `Config.enabled_tools` (the `ENABLED_TOOLS` env var), resolved against the
+  catalog by `resolve_tools()` — unknown names are silently ignored rather
+  than erroring, so removing a tool from the template doesn't break an
+  agent that still lists it. `bot.py`'s `_reply_to()` is the only caller:
+  it resolves tools once per message and only passes a `tools=` kwarg to
+  `llm_client.chat()` when the list is non-empty, so an agent with no tools
+  enabled exercises the exact same code path as before tools existed.
+  `web_search.py` hits DuckDuckGo's HTML endpoint directly (no API key, no
+  extra dependency) and redacts anything in a result that looks like a
+  prompt-injection attempt before it ever reaches the model — a search
+  result is untrusted content.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or

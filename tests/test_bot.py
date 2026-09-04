@@ -64,6 +64,7 @@ def make_config(**overrides) -> Config:
         whisper_model="small",
         max_history_tokens=2000,
         recent_history_tokens=500,
+        enabled_tools=[],
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -268,6 +269,45 @@ async def test_handle_message_refreshes_datetime_across_calls(monkeypatch):
     assert first_system_content != second_system_content
     assert "08:00" in first_system_content
     assert "20:00" in second_system_content
+
+
+async def test_handle_message_passes_enabled_tools_to_the_llm():
+    from app.tools.web_search import TOOL as SEARCH_WEB_TOOL
+
+    config = make_config(enabled_tools=["search_web"])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(text="search something"), make_context())
+
+    llm_client.chat.assert_awaited_once()
+    assert llm_client.chat.call_args.kwargs == {"tools": [SEARCH_WEB_TOOL]}
+
+
+async def test_handle_message_omits_tools_kwarg_when_none_enabled():
+    config = make_config(enabled_tools=[])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(), make_context())
+
+    assert llm_client.chat.call_args.kwargs == {}
+
+
+async def test_handle_message_ignores_unknown_tool_names():
+    config = make_config(enabled_tools=["not_a_real_tool"])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(), make_context())
+
+    assert llm_client.chat.call_args.kwargs == {}
 
 
 async def test_handle_message_denies_disallowed_user():

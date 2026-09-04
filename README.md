@@ -11,6 +11,9 @@ OpenRouter, proxies, etc.), running in Docker.
 - **Telegram**: `app/bot.py`, built on `python-telegram-bot`, with in-memory
   per-chat conversation history and an optional user whitelist
   (`ALLOWED_USER_IDS`).
+- **Tools**: `app/tools/` catalogs capabilities an agent can call mid-conversation
+  (currently `search_web`, DuckDuckGo, no API key). None are enabled by
+  default — opt in per agent via `ENABLED_TOOLS` in `.env`.
 - **Voice messages**: Telegram voice notes (and audio files) are transcribed
   locally with `faster-whisper` (CPU, no API key, independent of
   `LLM_BACKEND`) and fed to the model tagged as
@@ -124,6 +127,16 @@ OpenRouter, proxies, etc.), running in Docker.
   It's recomputed on every message (never baked in once and left to go
   stale), correctly handling DST — get this right or the model will
   confidently tell you the wrong time.
+- **Tools**: `ENABLED_TOOLS` in `.env` (comma-separated, e.g. `search_web`)
+  is the only thing that gives an agent access to a tool — the catalog in
+  `app/tools/` doesn't grant anything by itself, so a fresh agent starts
+  with none enabled and you add them per agent as needed. Add a tool at
+  setup time (edit `.env` before first `docker compose up`) or later (edit
+  it and `docker compose restart bot`) — `python update.py` also picks up
+  any *new* tool the template adds, without touching ones you've already
+  enabled. Requires a model that supports tool/function calling (qwen3:8b
+  and most cloud models do); if the model just ignores a tool, check that
+  first. Currently available: `search_web` (DuckDuckGo, no API key).
 - **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
   `medium`/`large-v3`) trades off speed for accuracy — `small` is a
   reasonable default on CPU. Every transcription is prefixed with

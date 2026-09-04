@@ -31,6 +31,7 @@ def test_load_defaults(monkeypatch, tmp_path):
     assert config.whisper_model == "small"
     assert config.max_history_tokens == 3000
     assert config.recent_history_tokens == 500
+    assert config.enabled_tools == []
 
 
 def test_load_custom_values(monkeypatch, tmp_path):
@@ -47,6 +48,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_MODEL", "medium")
     monkeypatch.setenv("MAX_HISTORY_TOKENS", "8000")
     monkeypatch.setenv("RECENT_HISTORY_TOKENS", "1000")
+    monkeypatch.setenv("ENABLED_TOOLS", "search_web, unknown_tool")
 
     config = Config.load()
 
@@ -59,6 +61,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     assert config.whisper_model == "medium"
     assert config.max_history_tokens == 8000
     assert config.recent_history_tokens == 1000
+    assert config.enabled_tools == ["search_web", "unknown_tool"]
 
 
 def test_load_invalid_max_history_tokens(monkeypatch):

@@ -13,6 +13,10 @@ def _split_ids(raw: str) -> set[int]:
     return {int(x) for x in raw.split(",") if x.strip()}
 
 
+def _split_names(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
 def _parse_int_env(name: str, default: str) -> int:
     raw = os.environ.get(name, default).strip()
     try:
@@ -37,6 +41,7 @@ class Config:
     whisper_model: str
     max_history_tokens: int
     recent_history_tokens: int
+    enabled_tools: list[str]
 
     @classmethod
     def load(cls) -> "Config":
@@ -74,4 +79,5 @@ class Config:
             whisper_model=os.environ.get("WHISPER_MODEL", "small"),
             max_history_tokens=max_history_tokens,
             recent_history_tokens=recent_history_tokens,
+            enabled_tools=_split_names(os.environ.get("ENABLED_TOOLS", "")),
         )

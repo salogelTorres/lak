@@ -14,6 +14,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandl
 
 from app.config import Config
 from app.llm import LLMClient
+from app.tools import resolve_tools
 
 logger = logging.getLogger(__name__)
 
@@ -251,8 +252,9 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
             # trims oldest messages first, whatever number of them that is
             history = _trim_to_token_budget(history, config.max_history_tokens)
 
+            tools = resolve_tools(config.enabled_tools)
             try:
-                reply = await llm_client.chat(history)
+                reply = await llm_client.chat(history, tools=tools) if tools else await llm_client.chat(history)
             except Exception:
                 logger.exception("Failed calling the LLM")
                 await update.message.reply_text("Something went wrong talking to the model. Please try again.")
