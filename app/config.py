@@ -26,6 +26,7 @@ class Config:
     cloud_api_base_url: str
     cloud_api_key: str
     cloud_model: str
+    whisper_model: str
 
     @classmethod
     def load(cls) -> "Config":
@@ -57,4 +58,5 @@ class Config:
             cloud_api_base_url=os.environ.get("CLOUD_API_BASE_URL", "https://api.openai.com/v1"),
             cloud_api_key=os.environ.get("CLOUD_API_KEY", ""),
             cloud_model=os.environ.get("CLOUD_MODEL", "gpt-4o-mini"),
+            whisper_model=os.environ.get("WHISPER_MODEL", "small"),
         )

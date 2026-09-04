@@ -11,6 +11,11 @@ OpenRouter, proxies, etc.), running in Docker.
 - **Telegram**: `app/bot.py`, built on `python-telegram-bot`, with in-memory
   per-chat conversation history and an optional user whitelist
   (`ALLOWED_USER_IDS`).
+- **Voice messages**: Telegram voice notes (and audio files) are transcribed
+  locally with `faster-whisper` (CPU, no API key, independent of
+  `LLM_BACKEND`) and fed to the model tagged as
+  `[Voice message, transcribed by Whisper]: ...`, so it always knows a
+  message was spoken rather than typed.
 - **Swappable LLM backend** (`app/llm.py`): `LLM_BACKEND=ollama` (the
   `ollama` container, reached at `http://ollama:11434`) or
   `LLM_BACKEND=cloud` (any OpenAI-compatible `/chat/completions` endpoint +
@@ -54,6 +59,10 @@ OpenRouter, proxies, etc.), running in Docker.
   it, not every conversation after a quiet period.
 - If you plan to use `LLM_BACKEND=cloud`: an API key for an OpenAI-compatible
   provider (OpenAI, OpenRouter, etc.).
+- Voice messages work regardless of `LLM_BACKEND`: the `small` Whisper model
+  (default) downloads once (~500MB) into the `whisper_data` volume the first
+  time you send a voice note, then runs on CPU — a few seconds for a short
+  message.
 
 ## Create a new agent
 
@@ -115,6 +124,11 @@ OpenRouter, proxies, etc.), running in Docker.
   It's recomputed on every message (never baked in once and left to go
   stale), correctly handling DST — get this right or the model will
   confidently tell you the wrong time.
+- **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
+  `medium`/`large-v3`) trades off speed for accuracy — `small` is a
+  reasonable default on CPU. Every transcription is prefixed with
+  `[Voice message, transcribed by Whisper]:` before being sent to the
+  model, so it can tell text and voice messages apart.
 
 `.env`, `app/prompts/system_prompt.txt`, and `docker-compose.override.yml`
 are all gitignored — see
@@ -183,7 +197,8 @@ docker compose down                                # stop and remove the contain
 
 Downloaded Ollama models persist in the `ollama_data` Docker volume across
 `docker compose down`/`up` — they're only re-downloaded if you remove that
-volume too (`docker compose down -v`).
+volume too (`docker compose down -v`). The Whisper model works the same way,
+in the `whisper_data` volume.
 
 ## Possible next steps
 

@@ -28,6 +28,7 @@ def test_load_defaults(monkeypatch, tmp_path):
     assert config.cloud_api_base_url == "https://api.openai.com/v1"
     assert config.cloud_api_key == ""
     assert config.cloud_model == "gpt-4o-mini"
+    assert config.whisper_model == "small"
 
 
 def test_load_custom_values(monkeypatch, tmp_path):
@@ -41,6 +42,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_BACKEND", "CLOUD")
     monkeypatch.setenv("CLOUD_API_KEY", "sk-test")
     monkeypatch.setenv("TZ", "Europe/Madrid")
+    monkeypatch.setenv("WHISPER_MODEL", "medium")
 
     config = Config.load()
 
@@ -50,6 +52,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     assert config.llm_backend == "cloud"
     assert config.cloud_api_key == "sk-test"
     assert config.timezone == "Europe/Madrid"
+    assert config.whisper_model == "medium"
 
 
 def test_load_blank_timezone_defaults_to_utc(monkeypatch):

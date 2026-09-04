@@ -8,6 +8,9 @@ services:
     volumes:
       # so you can tweak the system prompt without rebuilding the image
       - ./app/prompts:/app/app/prompts:ro
+      # Whisper model weights (voice message transcription), so they
+      # persist across rebuilds instead of re-downloading every time
+      - whisper_data:/data/whisper
 
   # Local model server. The bot reaches it at http://ollama:11434 (the
   # default OLLAMA_BASE_URL in .env.example), over the network Compose sets
@@ -41,3 +44,4 @@ services:
 
 volumes:
   ollama_data:
+  whisper_data:

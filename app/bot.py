@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from faster_whisper import WhisperModel
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
@@ -18,9 +20,42 @@ logger = logging.getLogger(__name__)
 MAX_HISTORY_MESSAGES = 20
 TYPING_REFRESH_SECONDS = 4
 
+# Prepended to every voice-note transcription so the model can always tell a
+# message was spoken rather than typed — otherwise "listen to that audio I
+# sent" is meaningless to it, since it only ever sees text.
+VOICE_TRANSCRIPTION_PREFIX = "[Voice message, transcribed by Whisper]"
+
+WHISPER_DOWNLOAD_ROOT = "/data/whisper"
+
+_whisper_models: dict[str, WhisperModel] = {}
+
 
 def _is_allowed(config: Config, user_id: int) -> bool:
     return not config.allowed_user_ids or user_id in config.allowed_user_ids
+
+
+def _get_whisper_model(model_name: str) -> WhisperModel:
+    # Loading a model is slow (first run downloads it too), so cache one
+    # instance per model name for the life of the process instead of
+    # reloading it on every voice message.
+    if model_name not in _whisper_models:
+        _whisper_models[model_name] = WhisperModel(
+            model_name, device="cpu", compute_type="int8", download_root=WHISPER_DOWNLOAD_ROOT
+        )
+    return _whisper_models[model_name]
+
+
+def _transcribe_sync(audio_bytes: bytes, model_name: str) -> str:
+    model = _get_whisper_model(model_name)
+    segments, _info = model.transcribe(io.BytesIO(audio_bytes))
+    return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+async def transcribe_voice(audio_bytes: bytes, model_name: str) -> str:
+    # faster-whisper is a blocking, CPU-bound call — run it off the event
+    # loop so it doesn't freeze the bot (typing indicators, other chats)
+    # while it works.
+    return await asyncio.to_thread(_transcribe_sync, audio_bytes, model_name)
 
 
 def _build_system_message(config: Config) -> dict[str, str]:
@@ -82,17 +117,18 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Hi, I'm {config.agent_name}. How can I help?")
 
-    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _has_access(update: Update) -> bool:
         user = update.effective_user
-        chat_id = update.effective_chat.id
-
         if user is None or not _is_allowed(config, user.id):
             await update.message.reply_text("You don't have access to this bot.")
-            return
+            return False
+        return True
 
+    async def _reply_to(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+        chat_id = update.effective_chat.id
         history = histories.setdefault(chat_id, [None])
         history[0] = _build_system_message(config)
-        history.append({"role": "user", "content": update.message.text})
+        history.append({"role": "user", "content": text})
 
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
         try:
@@ -113,11 +149,41 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
 
         await update.message.reply_text(reply)
 
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _has_access(update):
+            return
+        await _reply_to(update, context, update.message.text)
+
+    async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await _has_access(update):
+            return
+
+        voice = update.message.voice or update.message.audio
+        telegram_file = await context.bot.get_file(voice.file_id)
+        audio_bytes = bytes(await telegram_file.download_as_bytearray())
+
+        try:
+            text = await transcribe_voice(audio_bytes, config.whisper_model)
+        except Exception:
+            logger.exception("Failed transcribing voice message")
+            await update.message.reply_text(
+                "Couldn't transcribe that voice message. Please try again or send it as text."
+            )
+            return
+
+        text = text.strip()
+        if not text:
+            await update.message.reply_text("I couldn't make out any speech in that voice message.")
+            return
+
+        await _reply_to(update, context, f"{VOICE_TRANSCRIPTION_PREFIX}: {text}")
+
     async def post_init(application: Application) -> None:
         if config.llm_backend == "ollama":
             asyncio.create_task(_warm_up_ollama(llm_client))
 
     app = Application.builder().token(config.telegram_token).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app

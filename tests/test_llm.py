@@ -48,6 +48,7 @@ def make_config(**overrides) -> Config:
         cloud_api_base_url="https://api.example.com/v1",
         cloud_api_key="sk-test",
         cloud_model="gpt-4o-mini",
+        whisper_model="small",
     )
     defaults.update(overrides)
     return Config(**defaults)

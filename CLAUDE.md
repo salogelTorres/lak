@@ -85,9 +85,18 @@ absent.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart, capped at
-  `MAX_HISTORY_MESSAGES`), not a module-level or persisted store. Access
-  control (`ALLOWED_USER_IDS`) and LLM error handling both live in
-  `handle_message`.
+  `MAX_HISTORY_MESSAGES`), not a module-level or persisted store. `handle_message`
+  (text) and `handle_voice` (voice notes/audio files) both funnel through the
+  shared `_reply_to()` closure (access control, history, typing indicator,
+  LLM call, error handling, trimming) — add new input types the same way
+  rather than duplicating that logic. Voice notes are transcribed with
+  `faster-whisper` (`_transcribe_sync`, run off the event loop via
+  `asyncio.to_thread` since it's a blocking CPU call) and always prefixed
+  with `VOICE_TRANSCRIPTION_PREFIX` before being added to history, so the
+  model can tell a message was spoken vs. typed — the system prompt template
+  explains the convention. The `WhisperModel` instance is cached per model
+  name in the module-level `_whisper_models` dict (loading one is slow), not
+  reloaded per message.
 
 **Docker**: `docker-compose.yml` defines `bot` and `ollama` as separate
 services on the Compose network; the bot always reaches Ollama at
@@ -95,4 +104,5 @@ services on the Compose network; the bot always reaches Ollama at
 just sits idle if `LLM_BACKEND=cloud`). `app/prompts/` is bind-mounted into
 the container read-only so prompt edits take effect with
 `docker compose restart` — no rebuild needed. Ollama's model cache lives in
-the named volume `ollama_data`, surviving `down`/`up` but not `down -v`.
+the named volume `ollama_data`, and Whisper's in `whisper_data`, both
+surviving `down`/`up` but not `down -v`.

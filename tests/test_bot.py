@@ -7,8 +7,25 @@ import pytest
 from telegram.constants import ChatAction
 from telegram.ext import CommandHandler, MessageHandler
 
-from app.bot import _build_system_message, _is_allowed, _warm_up_ollama, build_application
+import app.bot as bot_module
+from app.bot import (
+    VOICE_TRANSCRIPTION_PREFIX,
+    _build_system_message,
+    _get_whisper_model,
+    _is_allowed,
+    _transcribe_sync,
+    _warm_up_ollama,
+    build_application,
+    transcribe_voice,
+)
 from app.config import Config
+
+
+@pytest.fixture(autouse=True)
+def clear_whisper_model_cache():
+    bot_module._whisper_models.clear()
+    yield
+    bot_module._whisper_models.clear()
 
 
 def freeze_now(monkeypatch, fixed: datetime):
@@ -38,6 +55,7 @@ def make_config(**overrides) -> Config:
         cloud_api_base_url="https://api.example.com/v1",
         cloud_api_key="",
         cloud_model="gpt-4o-mini",
+        whisper_model="small",
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -48,7 +66,21 @@ def make_update(*, user_id=1, text="hello"):
     update.effective_user.id = user_id
     update.effective_chat.id = 42
     update.message.text = text
+    update.message.voice = None
+    update.message.audio = None
     update.message.reply_text = AsyncMock()
+    return update
+
+
+def make_voice_update(*, user_id=1, file_id="file123", as_audio=False):
+    update = MagicMock()
+    update.effective_user.id = user_id
+    update.effective_chat.id = 42
+    update.message.reply_text = AsyncMock()
+    voice_obj = MagicMock()
+    voice_obj.file_id = file_id
+    update.message.voice = None if as_audio else voice_obj
+    update.message.audio = voice_obj if as_audio else None
     return update
 
 
@@ -58,11 +90,29 @@ def make_context():
     return context
 
 
+def make_voice_context(audio_bytes=b"fake-audio-bytes"):
+    context = make_context()
+    telegram_file = MagicMock()
+    telegram_file.download_as_bytearray = AsyncMock(return_value=bytearray(audio_bytes))
+    context.bot.get_file = AsyncMock(return_value=telegram_file)
+    return context
+
+
 def get_handlers(app):
     handlers = app.handlers[0]
     start = next(h for h in handlers if isinstance(h, CommandHandler))
-    message = next(h for h in handlers if isinstance(h, MessageHandler))
+    message = next(
+        h for h in handlers if isinstance(h, MessageHandler) and h.callback.__name__ == "handle_message"
+    )
     return start.callback, message.callback
+
+
+def get_voice_handler(app):
+    handlers = app.handlers[0]
+    voice = next(
+        h for h in handlers if isinstance(h, MessageHandler) and h.callback.__name__ == "handle_voice"
+    )
+    return voice.callback
 
 
 def make_recording_llm_client(replies):
@@ -364,3 +414,153 @@ async def test_handle_message_trims_history(monkeypatch):
     # chat() can be one longer right before that call's own trim happens.
     assert len(last_messages) <= 21
     assert not any(m.get("content") == "msg-0" for m in last_messages)
+
+
+class FakeSegment:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeWhisperModel:
+    """Records how it was constructed and returns canned segments."""
+
+    instances: list["FakeWhisperModel"] = []
+
+    def __init__(self, model_name, **kwargs):
+        self.model_name = model_name
+        self.kwargs = kwargs
+        self.transcribed_with: list = []
+        FakeWhisperModel.instances.append(self)
+
+    def transcribe(self, audio_file):
+        self.transcribed_with.append(audio_file)
+        return [FakeSegment(" hello "), FakeSegment("world ")], object()
+
+
+def test_get_whisper_model_uses_expected_params(monkeypatch):
+    monkeypatch.setattr(bot_module, "WhisperModel", FakeWhisperModel)
+    FakeWhisperModel.instances = []
+
+    model = _get_whisper_model("small")
+
+    assert isinstance(model, FakeWhisperModel)
+    assert model.model_name == "small"
+    assert model.kwargs == {"device": "cpu", "compute_type": "int8", "download_root": bot_module.WHISPER_DOWNLOAD_ROOT}
+
+
+def test_get_whisper_model_caches_instance_per_model_name(monkeypatch):
+    monkeypatch.setattr(bot_module, "WhisperModel", FakeWhisperModel)
+    FakeWhisperModel.instances = []
+
+    first = _get_whisper_model("small")
+    second = _get_whisper_model("small")
+    third = _get_whisper_model("medium")
+
+    assert first is second
+    assert third is not first
+    assert len(FakeWhisperModel.instances) == 2
+
+
+def test_transcribe_sync_joins_segment_text(monkeypatch):
+    monkeypatch.setattr(bot_module, "WhisperModel", FakeWhisperModel)
+
+    result = _transcribe_sync(b"raw-audio-bytes", "small")
+
+    assert result == "hello world"
+
+
+async def test_transcribe_voice_delegates_to_sync_function(monkeypatch):
+    monkeypatch.setattr(
+        bot_module, "_transcribe_sync", lambda audio, model_name: f"{model_name}:{len(audio)}"
+    )
+
+    result = await transcribe_voice(b"1234", "small")
+
+    assert result == "small:4"
+
+
+async def test_handle_voice_transcribes_and_replies(monkeypatch):
+    config = make_config()
+    llm_client, calls = make_recording_llm_client(["got it"])
+    app = build_application(config, llm_client)
+    handle_voice = get_voice_handler(app)
+
+    monkeypatch.setattr(bot_module, "transcribe_voice", AsyncMock(return_value="hola que tal"))
+
+    update = make_voice_update()
+    context = make_voice_context()
+    await handle_voice(update, context)
+
+    context.bot.get_file.assert_awaited_once_with("file123")
+    sent_messages = calls[0]
+    assert sent_messages[-1] == {
+        "role": "user",
+        "content": f"{VOICE_TRANSCRIPTION_PREFIX}: hola que tal",
+    }
+    update.message.reply_text.assert_awaited_once_with("got it")
+
+
+async def test_handle_voice_accepts_audio_files_too(monkeypatch):
+    config = make_config()
+    llm_client, calls = make_recording_llm_client(["got it"])
+    app = build_application(config, llm_client)
+    handle_voice = get_voice_handler(app)
+
+    monkeypatch.setattr(bot_module, "transcribe_voice", AsyncMock(return_value="hola"))
+
+    update = make_voice_update(as_audio=True)
+    context = make_voice_context()
+    await handle_voice(update, context)
+
+    context.bot.get_file.assert_awaited_once_with("file123")
+    assert calls[0][-1]["content"] == f"{VOICE_TRANSCRIPTION_PREFIX}: hola"
+
+
+async def test_handle_voice_denies_disallowed_user():
+    config = make_config(allowed_user_ids={99})
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+    handle_voice = get_voice_handler(app)
+
+    update = make_voice_update(user_id=1)
+    context = make_voice_context()
+    await handle_voice(update, context)
+
+    context.bot.get_file.assert_not_called()
+    update.message.reply_text.assert_awaited_once_with("You don't have access to this bot.")
+
+
+async def test_handle_voice_reports_transcription_failure(monkeypatch):
+    config = make_config()
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+    handle_voice = get_voice_handler(app)
+
+    monkeypatch.setattr(bot_module, "transcribe_voice", AsyncMock(side_effect=RuntimeError("boom")))
+
+    update = make_voice_update()
+    context = make_voice_context()
+    await handle_voice(update, context)
+
+    llm_client.chat.assert_not_called()
+    update.message.reply_text.assert_awaited_once_with(
+        "Couldn't transcribe that voice message. Please try again or send it as text."
+    )
+
+
+async def test_handle_voice_reports_empty_transcription(monkeypatch):
+    config = make_config()
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+    handle_voice = get_voice_handler(app)
+
+    monkeypatch.setattr(bot_module, "transcribe_voice", AsyncMock(return_value="   "))
+
+    update = make_voice_update()
+    context = make_voice_context()
+    await handle_voice(update, context)
+
+    llm_client.chat.assert_not_called()
+    update.message.reply_text.assert_awaited_once_with(
+        "I couldn't make out any speech in that voice message."
+    )

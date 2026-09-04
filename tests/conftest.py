@@ -12,6 +12,7 @@ ENV_KEYS = [
     "CLOUD_API_BASE_URL",
     "CLOUD_API_KEY",
     "CLOUD_MODEL",
+    "WHISPER_MODEL",
 ]
 
 
