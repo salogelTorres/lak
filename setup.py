@@ -7,7 +7,8 @@ Usage:
 Asks only for the values that make sense to customize per agent, writes the
 result to .env (keeping every other key at its .env.example default),
 creates app/prompts/system_prompt.txt from its template on first run, and
-optionally starts the agent with `docker compose up -d --build`.
+optionally starts the agent with `docker compose up -d --build` (pulling the
+Ollama model automatically when that's the chosen backend).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -107,6 +109,30 @@ def apply_personality(instructions: str) -> None:
             f.write(f"\n{instructions}\n")
 
 
+def pull_ollama_model(model: str, *, retries: int = 10, delay_seconds: float = 3) -> bool:
+    """Download `model` into the ollama service's volume.
+
+    The ollama container needs a moment to start accepting commands after
+    `docker compose up`, so this retries a few times before giving up.
+    """
+    print(f"\nPulling Ollama model '{model}' (first time only, can take a while)...")
+    for _ in range(retries):
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "ollama", "ollama", "pull", model],
+            cwd=ROOT,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        time.sleep(delay_seconds)
+
+    print(
+        "Could not pull the model automatically. Once the agent is up, run:\n"
+        f"  docker compose exec ollama ollama pull {model}"
+    )
+    return False
+
+
 def main() -> None:
     if ENV_FILE.exists():
         overwrite = input(".env already exists. Overwrite it? (y/N): ").strip().lower()
@@ -144,6 +170,8 @@ def main() -> None:
     launch = input("\nStart the agent now with docker compose? (Y/n): ").strip().lower()
     if launch in ("", "y"):
         subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=ROOT, check=False)
+        if values["LLM_BACKEND"] == "ollama":
+            pull_ollama_model(values["OLLAMA_MODEL"])
         print("\nAgent is up. Check logs with: docker compose logs -f")
     else:
         print("When you're ready: docker compose up -d --build")

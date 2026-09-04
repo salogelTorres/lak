@@ -10,7 +10,7 @@ ALLOWED_USER_IDS=
 AGENT_NAME=Assistant
 SYSTEM_PROMPT_FILE=app/prompts/system_prompt.txt
 LLM_BACKEND=ollama
-OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_BASE_URL=http://ollama:11434
 OLLAMA_MODEL=llama3
 CLOUD_API_BASE_URL=https://api.openai.com/v1
 CLOUD_API_KEY=
@@ -142,6 +142,44 @@ def test_apply_personality_noop_when_file_missing(env_paths):
     assert not setup.SYSTEM_PROMPT_FILE.exists()
 
 
+def test_pull_ollama_model_succeeds_on_first_try(monkeypatch):
+    run_mock = MagicMock(return_value=MagicMock(returncode=0))
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    sleep_mock = MagicMock()
+    monkeypatch.setattr(setup.time, "sleep", sleep_mock)
+
+    assert setup.pull_ollama_model("llama3") is True
+    run_mock.assert_called_once_with(
+        ["docker", "compose", "exec", "-T", "ollama", "ollama", "pull", "llama3"],
+        cwd=setup.ROOT,
+        check=False,
+    )
+    sleep_mock.assert_not_called()
+
+
+def test_pull_ollama_model_retries_then_succeeds(monkeypatch):
+    run_mock = MagicMock(
+        side_effect=[MagicMock(returncode=1), MagicMock(returncode=1), MagicMock(returncode=0)]
+    )
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    sleep_mock = MagicMock()
+    monkeypatch.setattr(setup.time, "sleep", sleep_mock)
+
+    assert setup.pull_ollama_model("llama3", retries=5, delay_seconds=0) is True
+    assert run_mock.call_count == 3
+    assert sleep_mock.call_count == 2
+
+
+def test_pull_ollama_model_gives_up_after_retries(monkeypatch, capsys):
+    run_mock = MagicMock(return_value=MagicMock(returncode=1))
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    monkeypatch.setattr(setup.time, "sleep", MagicMock())
+
+    assert setup.pull_ollama_model("llama3", retries=2, delay_seconds=0) is False
+    assert run_mock.call_count == 2
+    assert "Could not pull the model automatically" in capsys.readouterr().out
+
+
 def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
     _, env_file, _ = env_paths
     env_file.write_text("EXISTING=1\n", encoding="utf-8")
@@ -187,6 +225,8 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
     monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    pull_mock = MagicMock()
+    monkeypatch.setattr(setup, "pull_ollama_model", pull_mock)
     scripted_input(
         monkeypatch,
         [
@@ -213,6 +253,28 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
     run_mock.assert_called_once_with(
         ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
     )
+    pull_mock.assert_not_called()
+    assert "Agent is up" in capsys.readouterr().out
+
+
+def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypatch, capsys):
+    _, env_file, _ = env_paths
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
+    run_mock = MagicMock()
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    pull_mock = MagicMock(return_value=True)
+    monkeypatch.setattr(setup, "pull_ollama_model", pull_mock)
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "qwen3:8b", "", ""])
+
+    setup.main()
+
+    values = env_dict(env_file)
+    assert values["LLM_BACKEND"] == "ollama"
+    assert values["OLLAMA_MODEL"] == "qwen3:8b"
+    run_mock.assert_called_once_with(
+        ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
+    )
+    pull_mock.assert_called_once_with("qwen3:8b")
     assert "Agent is up" in capsys.readouterr().out
 
 

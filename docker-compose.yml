@@ -3,23 +3,36 @@ services:
     build: .
     env_file: .env
     restart: unless-stopped
+    depends_on:
+      - ollama
     volumes:
       # so you can tweak the system prompt without rebuilding the image
       - ./app/prompts:/app/app/prompts:ro
 
-  # Optional: run Ollama itself in Docker instead of using one already
-  # installed on the host. Uncomment if you want everything containerized.
-  # (On Windows/Mac with Docker Desktop, a host-installed Ollama is already
-  # reachable from the bot via OLLAMA_BASE_URL=http://host.docker.internal:11434,
-  # so this is usually not needed.)
+  # Local model server. The bot reaches it at http://ollama:11434 (the
+  # default OLLAMA_BASE_URL in .env.example), over the network Compose sets
+  # up between the two services — no host-installed Ollama needed.
   #
-  # ollama:
-  #   image: ollama/ollama
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ollama_data:/root/.ollama
-  #   ports:
-  #     - "11434:11434"
+  # Not used at all when LLM_BACKEND=cloud, but Compose still starts it
+  # since `bot` depends on it; that's harmless (idle container, no requests
+  # sent to it) and keeps this file simple. Remove the `ollama` service and
+  # `bot`'s `depends_on` if you only ever use the cloud backend.
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    # Uncomment for NVIDIA GPU acceleration (requires the NVIDIA Container
+    # Toolkit on the host):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
-# volumes:
-#   ollama_data:
+volumes:
+  ollama_data:
