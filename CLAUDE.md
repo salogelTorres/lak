@@ -27,6 +27,8 @@ pytest -k "llm_backend"                         # by keyword
 
 python setup.py                 # interactive wizard: writes .env, system_prompt.txt,
                                  # docker-compose.override.yml, then docker compose up
+python update.py                # existing agent: fetch+merge template/main, fill in
+                                 # any new .env keys, then docker compose up -d --build
 docker compose up -d --build    # run without the wizard (needs .env already present)
 docker compose logs -f          # follow bot + ollama logs
 docker compose exec ollama ollama pull <model>   # pull/switch a local model
@@ -67,11 +69,15 @@ share this template safely. Each has a tracked `.example` counterpart, and
 `setup.py` populates the real file only if it doesn't already exist ("never
 clobber personalization/host config" is a hard invariant — see
 `ensure_system_prompt()` / `ensure_gpu_override()`). This is what lets an
-already-configured agent do `git fetch template && git merge template/main`
-to pick up template improvements without losing its token, personality, or
-GPU config. Any new per-agent setting must follow this same pattern: default
-committed as `<name>.example`, real file gitignored and only created if
-absent.
+already-configured agent run **`update.py`** (repo root, imports `setup` and
+reuses its `ROOT`/`ENV_FILE`/`parse_env_example`/`ensure_*` functions rather
+than duplicating them) to fetch+merge `template/main` and rebuild without
+losing its token, personality, or GPU config. `update.py` also back-fills
+any `.env.example` key a merge introduces that isn't in the agent's `.env`
+yet (`fill_in_new_env_keys()`) — this is why any new per-agent setting must
+follow the same pattern as existing ones: default committed as
+`<name>.example`, real file/key gitignored-or-backfilled, never silently
+required.
 
 **Runtime code** (`app/`), wired together in `app/main.py`:
 - `config.py` — `Config.load()` reads env vars (via `python-dotenv`, though

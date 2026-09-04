@@ -1,7 +1,7 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
-addopts = "--cov=app --cov=setup --cov-report=term-missing --cov-fail-under=99"
+addopts = "--cov=app --cov=setup --cov=update --cov-report=term-missing --cov-fail-under=99"
 
 [tool.coverage.run]
 branch = true

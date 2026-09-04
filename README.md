@@ -153,24 +153,36 @@ template updates never overwrites your customization or GPU config — only
 tracked files (code, `Dockerfile`, `docker-compose.yml`, the `.example`
 files, etc.) get updated.
 
-In each agent's folder, one-time setup:
+Whenever you want to pull in the latest template changes, from the agent's
+folder:
 
 ```bash
-git remote add template https://github.com/salogelTorres/lak.git
+python update.py
 ```
 
-Whenever you want to pull in the latest template changes:
-
-```bash
-git fetch template
-git merge template/main
-docker compose up -d --build   # rebuild with the updated code
-```
+It adds the `template` remote the first time it's needed, then runs, in
+order: `git fetch template`, `git merge template/main --no-edit`, fills in
+any *new* `.env` setting the update introduced (using its `.env.example`
+default — never touches a setting you already have), re-creates
+`system_prompt.txt`/`docker-compose.override.yml` if they went missing,
+enables GPU acceleration if this machine has one and didn't before, and
+finally `docker compose up -d --build`. Safe to re-run any time.
 
 If you've hand-edited a tracked file too (rare — normally only `.env`,
-`system_prompt.txt`, and `docker-compose.override.yml` are), git will flag a
-merge conflict for that file; the personalization/host files themselves are
-never part of the conflict since git doesn't track them.
+`system_prompt.txt`, and `docker-compose.override.yml` are), the merge step
+will flag a conflict for that file; resolve it by hand (`git status` shows
+which), commit, and run `python update.py` again. The personalization/host
+files themselves are never part of the conflict since git doesn't track
+them.
+
+Equivalent by hand, if you'd rather not run the script:
+
+```bash
+git remote add template https://github.com/salogelTorres/lak.git   # once
+git fetch template
+git merge template/main
+docker compose up -d --build
+```
 
 ## Running the tests
 
