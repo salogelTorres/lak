@@ -9,6 +9,7 @@ TELEGRAM_BOT_TOKEN=
 ALLOWED_USER_IDS=
 AGENT_NAME=Assistant
 SYSTEM_PROMPT_FILE=app/prompts/system_prompt.txt
+TZ=UTC
 LLM_BACKEND=ollama
 OLLAMA_BASE_URL=http://ollama:11434
 OLLAMA_MODEL=llama3
@@ -259,6 +260,7 @@ def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
             "my-token",  # TELEGRAM_BOT_TOKEN
             "",  # ALLOWED_USER_IDS (default)
             "Rex",  # AGENT_NAME
+            "Europe/Madrid",  # TZ
             "",  # LLM_BACKEND (default: ollama)
             "qwen3:8b",  # OLLAMA_MODEL
             "",  # personality (skip)
@@ -270,6 +272,7 @@ def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
     values = env_dict(env_file)
     assert values["TELEGRAM_BOT_TOKEN"] == "my-token"
     assert values["AGENT_NAME"] == "Rex"
+    assert values["TZ"] == "Europe/Madrid"
     assert values["LLM_BACKEND"] == "ollama"
     assert values["OLLAMA_MODEL"] == "qwen3:8b"
     assert values["SYSTEM_PROMPT_FILE"] == "app/prompts/system_prompt.txt"
@@ -292,6 +295,7 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
             "my-token",
             "123,456",
             "Rex2",
+            "",  # TZ (default: UTC)
             "cloud",
             "sk-key",
             "gpt-4o",
@@ -303,6 +307,7 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
     setup.main()
 
     values = env_dict(env_file)
+    assert values["TZ"] == "UTC"
     assert values["LLM_BACKEND"] == "cloud"
     assert values["CLOUD_API_KEY"] == "sk-key"
     assert values["CLOUD_MODEL"] == "gpt-4o"
@@ -323,7 +328,7 @@ def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypat
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     pull_mock = MagicMock(return_value=True)
     monkeypatch.setattr(setup, "pull_ollama_model", pull_mock)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "qwen3:8b", "", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", ""])
 
     setup.main()
 
@@ -344,7 +349,7 @@ def test_main_ollama_backend_with_gpu_enables_override(env_paths, monkeypatch, c
     monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
     monkeypatch.setattr(setup.subprocess, "run", MagicMock())
     monkeypatch.setattr(setup, "pull_ollama_model", MagicMock(return_value=True))
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "qwen3:8b", "", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", ""])
 
     setup.main()
 
@@ -356,7 +361,7 @@ def test_main_declines_docker_launch(env_paths, monkeypatch, capsys):
     _, env_file, _, gpu_override_file = env_paths
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "llama3", "", "n"])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "", "llama3", "", "n"])
 
     setup.main()
 
@@ -368,7 +373,7 @@ def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monk
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
     scripted_input(
         monkeypatch,
-        ["my-token", "", "Rex", "nope", "local", "llama3", ""],
+        ["my-token", "", "Rex", "", "nope", "local", "llama3", ""],
     )
 
     setup.main()  # must not raise
@@ -377,7 +382,7 @@ def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monk
 def test_main_accepts_local_as_ollama_alias(env_paths, monkeypatch):
     _, env_file, _, _ = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "llama3", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "llama3", ""])
 
     setup.main()
 

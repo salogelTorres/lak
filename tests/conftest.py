@@ -5,6 +5,7 @@ ENV_KEYS = [
     "ALLOWED_USER_IDS",
     "AGENT_NAME",
     "SYSTEM_PROMPT_FILE",
+    "TZ",
     "LLM_BACKEND",
     "OLLAMA_BASE_URL",
     "OLLAMA_MODEL",

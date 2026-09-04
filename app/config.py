@@ -19,6 +19,7 @@ class Config:
     allowed_user_ids: set[int]
     agent_name: str
     system_prompt: str
+    timezone: str
     llm_backend: str
     ollama_base_url: str
     ollama_model: str
@@ -49,9 +50,10 @@ class Config:
             allowed_user_ids=_split_ids(os.environ.get("ALLOWED_USER_IDS", "")),
             agent_name=agent_name,
             system_prompt=system_prompt,
+            timezone=os.environ.get("TZ", "UTC").strip() or "UTC",
             llm_backend=backend,
             ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-            ollama_model=os.environ.get("OLLAMA_MODEL", "llama3"),
+            ollama_model=os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
             cloud_api_base_url=os.environ.get("CLOUD_API_BASE_URL", "https://api.openai.com/v1"),
             cloud_api_key=os.environ.get("CLOUD_API_KEY", ""),
             cloud_model=os.environ.get("CLOUD_MODEL", "gpt-4o-mini"),

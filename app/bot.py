@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -19,6 +21,20 @@ TYPING_REFRESH_SECONDS = 4
 
 def _is_allowed(config: Config, user_id: int) -> bool:
     return not config.allowed_user_ids or user_id in config.allowed_user_ids
+
+
+def _build_system_message(config: Config) -> dict[str, str]:
+    """Recomputed on every message so the date/time is never stale, unlike
+    the rest of the system prompt, which is fixed for the process lifetime.
+    """
+    tz_name = config.timezone
+    try:
+        now = datetime.now(ZoneInfo(tz_name))
+    except ZoneInfoNotFoundError:
+        tz_name = "UTC"
+        now = datetime.now(ZoneInfo(tz_name))
+    datetime_line = f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
+    return {"role": "system", "content": f"{config.system_prompt}\n\n{datetime_line}"}
 
 
 async def _warm_up_ollama(llm_client: LLMClient, *, retries: int = 10, delay_seconds: float = 3) -> None:
@@ -74,7 +90,8 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
             await update.message.reply_text("You don't have access to this bot.")
             return
 
-        history = histories.setdefault(chat_id, [{"role": "system", "content": config.system_prompt}])
+        history = histories.setdefault(chat_id, [None])
+        history[0] = _build_system_message(config)
         history.append({"role": "user", "content": update.message.text})
 
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))

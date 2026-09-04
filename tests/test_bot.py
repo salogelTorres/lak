@@ -1,13 +1,28 @@
 import asyncio
 import logging
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram.constants import ChatAction
 from telegram.ext import CommandHandler, MessageHandler
 
-from app.bot import _is_allowed, _warm_up_ollama, build_application
+from app.bot import _build_system_message, _is_allowed, _warm_up_ollama, build_application
 from app.config import Config
+
+
+def freeze_now(monkeypatch, fixed: datetime):
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.replace(tzinfo=tz) if tz else fixed
+
+    monkeypatch.setattr("app.bot.datetime", _FrozenDatetime)
+
+
+def expected_system_content(system_prompt: str, fixed: datetime, tz_name: str) -> str:
+    datetime_line = f"Current date and time: {fixed.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
+    return f"{system_prompt}\n\n{datetime_line}"
 
 
 def make_config(**overrides) -> Config:
@@ -16,6 +31,7 @@ def make_config(**overrides) -> Config:
         allowed_user_ids=set(),
         agent_name="Rex",
         system_prompt="You are Rex.",
+        timezone="UTC",
         llm_backend="ollama",
         ollama_base_url="http://ollama:11434",
         ollama_model="llama3",
@@ -78,6 +94,39 @@ def test_is_allowed(allowed, user_id, expected):
     assert _is_allowed(config, user_id) is expected
 
 
+def test_build_system_message_includes_current_datetime(monkeypatch):
+    fixed = datetime(2026, 9, 4, 20, 30)
+    freeze_now(monkeypatch, fixed)
+    config = make_config(system_prompt="You are Rex.", timezone="Europe/Madrid")
+
+    message = _build_system_message(config)
+
+    assert message["role"] == "system"
+    assert message["content"] == expected_system_content("You are Rex.", fixed, "Europe/Madrid")
+
+
+def test_build_system_message_falls_back_to_utc_for_unknown_timezone():
+    config = make_config(system_prompt="You are Rex.", timezone="Not/AZone")
+
+    message = _build_system_message(config)
+
+    assert "(UTC)" in message["content"]
+
+
+def test_build_system_message_refreshes_between_calls(monkeypatch):
+    config = make_config(system_prompt="You are Rex.", timezone="UTC")
+
+    freeze_now(monkeypatch, datetime(2026, 9, 4, 8, 0))
+    first = _build_system_message(config)
+
+    freeze_now(monkeypatch, datetime(2026, 9, 4, 20, 0))
+    second = _build_system_message(config)
+
+    assert first["content"] != second["content"]
+    assert "08:00" in first["content"]
+    assert "20:00" in second["content"]
+
+
 async def test_start_replies_with_greeting():
     config = make_config()
     llm_client = AsyncMock()
@@ -90,7 +139,9 @@ async def test_start_replies_with_greeting():
     update.message.reply_text.assert_awaited_once_with("Hi, I'm Rex. How can I help?")
 
 
-async def test_handle_message_replies_with_llm_output():
+async def test_handle_message_replies_with_llm_output(monkeypatch):
+    fixed = datetime(2026, 9, 4, 20, 30)
+    freeze_now(monkeypatch, fixed)
     config = make_config()
     llm_client, calls = make_recording_llm_client(["the answer"])
     app = build_application(config, llm_client)
@@ -101,7 +152,10 @@ async def test_handle_message_replies_with_llm_output():
 
     llm_client.chat.assert_awaited_once()
     sent_messages = calls[0]
-    assert sent_messages[0] == {"role": "system", "content": "You are Rex."}
+    assert sent_messages[0] == {
+        "role": "system",
+        "content": expected_system_content("You are Rex.", fixed, "UTC"),
+    }
     assert sent_messages[-1] == {"role": "user", "content": "what's up?"}
     update.message.reply_text.assert_awaited_once_with("the answer")
 
@@ -120,6 +174,25 @@ async def test_handle_message_keeps_history_across_calls():
     assert ("user", "one") in roles_and_content
     assert ("assistant", "first") in roles_and_content
     assert ("user", "two") in roles_and_content
+
+
+async def test_handle_message_refreshes_datetime_across_calls(monkeypatch):
+    config = make_config()
+    llm_client, calls = make_recording_llm_client(["first", "second"])
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    freeze_now(monkeypatch, datetime(2026, 9, 4, 8, 0))
+    await handle_message(make_update(text="one"), make_context())
+
+    freeze_now(monkeypatch, datetime(2026, 9, 4, 20, 0))
+    await handle_message(make_update(text="two"), make_context())
+
+    first_system_content = calls[0][0]["content"]
+    second_system_content = calls[1][0]["content"]
+    assert first_system_content != second_system_content
+    assert "08:00" in first_system_content
+    assert "20:00" in second_system_content
 
 
 async def test_handle_message_denies_disallowed_user():
@@ -271,7 +344,9 @@ async def test_post_init_skips_warmup_for_cloud_backend():
     llm_client.chat.assert_not_called()
 
 
-async def test_handle_message_trims_history():
+async def test_handle_message_trims_history(monkeypatch):
+    fixed = datetime(2026, 9, 4, 20, 30)
+    freeze_now(monkeypatch, fixed)
     config = make_config()
     llm_client, calls = make_recording_llm_client([f"reply-{i}" for i in range(25)])
     app = build_application(config, llm_client)
@@ -281,7 +356,10 @@ async def test_handle_message_trims_history():
         await handle_message(make_update(text=f"msg-{i}"), make_context())
 
     last_messages = calls[-1]
-    assert last_messages[0] == {"role": "system", "content": "You are Rex."}
+    assert last_messages[0] == {
+        "role": "system",
+        "content": expected_system_content("You are Rex.", fixed, "UTC"),
+    }
     # MAX_HISTORY_MESSAGES caps the *stored* history at 20; the list passed to
     # chat() can be one longer right before that call's own trim happens.
     assert len(last_messages) <= 21

@@ -31,7 +31,7 @@ GPU_OVERRIDE_FILE = ROOT / "docker-compose.override.yml"
 # Keys always asked, regardless of LLM backend. SYSTEM_PROMPT_FILE, the
 # *_BASE_URL keys, etc. are intentionally not here: they're internal wiring,
 # not something a new agent's owner should be typing free text into.
-BASE_KEYS = ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_IDS", "AGENT_NAME"]
+BASE_KEYS = ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_IDS", "AGENT_NAME", "TZ"]
 
 # Extra keys asked only for the chosen backend.
 BACKEND_KEYS = {
@@ -56,6 +56,7 @@ PROMPTS = {
     "TELEGRAM_BOT_TOKEN": "Telegram bot token (from @BotFather)",
     "ALLOWED_USER_IDS": "Telegram IDs allowed to use the bot, comma-separated (empty = anyone)",
     "AGENT_NAME": "Agent name",
+    "TZ": "Timezone (IANA name, e.g. Europe/Madrid, America/New_York)",
     "OLLAMA_MODEL": "Ollama model",
     "CLOUD_API_KEY": "Cloud backend API key",
     "CLOUD_MODEL": "Cloud backend model",

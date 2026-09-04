@@ -41,6 +41,7 @@ def make_config(**overrides) -> Config:
         allowed_user_ids=set(),
         agent_name="Assistant",
         system_prompt="",
+        timezone="UTC",
         llm_backend="ollama",
         ollama_base_url="http://ollama:11434",
         ollama_model="llama3",

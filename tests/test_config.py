@@ -21,9 +21,10 @@ def test_load_defaults(monkeypatch, tmp_path):
     assert config.agent_name == "Assistant"
     assert config.system_prompt == "Hi, I'm Assistant."
     assert config.allowed_user_ids == set()
+    assert config.timezone == "UTC"
     assert config.llm_backend == "ollama"
     assert config.ollama_base_url == "http://host.docker.internal:11434"
-    assert config.ollama_model == "llama3"
+    assert config.ollama_model == "qwen3:8b"
     assert config.cloud_api_base_url == "https://api.openai.com/v1"
     assert config.cloud_api_key == ""
     assert config.cloud_model == "gpt-4o-mini"
@@ -39,6 +40,7 @@ def test_load_custom_values(monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOWED_USER_IDS", "1, 2,3")
     monkeypatch.setenv("LLM_BACKEND", "CLOUD")
     monkeypatch.setenv("CLOUD_API_KEY", "sk-test")
+    monkeypatch.setenv("TZ", "Europe/Madrid")
 
     config = Config.load()
 
@@ -47,6 +49,16 @@ def test_load_custom_values(monkeypatch, tmp_path):
     assert config.allowed_user_ids == {1, 2, 3}
     assert config.llm_backend == "cloud"
     assert config.cloud_api_key == "sk-test"
+    assert config.timezone == "Europe/Madrid"
+
+
+def test_load_blank_timezone_defaults_to_utc(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TZ", "   ")
+
+    config = Config.load()
+
+    assert config.timezone == "UTC"
 
 
 def test_load_missing_prompt_file_is_empty(monkeypatch, tmp_path):
