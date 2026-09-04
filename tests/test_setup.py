@@ -4,14 +4,24 @@ import pytest
 
 import setup
 
+ENV_EXAMPLE_CONTENT = """\
+TELEGRAM_BOT_TOKEN=
+ALLOWED_USER_IDS=
+AGENT_NAME=Assistant
+SYSTEM_PROMPT_FILE=app/prompts/system_prompt.txt
+LLM_BACKEND=ollama
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=llama3
+CLOUD_API_BASE_URL=https://api.openai.com/v1
+CLOUD_API_KEY=
+CLOUD_MODEL=gpt-4o-mini
+"""
+
 
 @pytest.fixture
 def env_paths(tmp_path, monkeypatch):
     env_example = tmp_path / ".env.example"
-    env_example.write_text(
-        "# a comment\n\nTELEGRAM_BOT_TOKEN=\nAGENT_NAME=Assistant\n",
-        encoding="utf-8",
-    )
+    env_example.write_text(ENV_EXAMPLE_CONTENT, encoding="utf-8")
     env_file = tmp_path / ".env"
 
     prompt_dir = tmp_path / "app" / "prompts"
@@ -25,12 +35,28 @@ def env_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(setup, "ROOT", tmp_path)
     monkeypatch.setattr(setup, "SYSTEM_PROMPT_EXAMPLE", prompt_example)
     monkeypatch.setattr(setup, "SYSTEM_PROMPT_FILE", prompt_file)
-    return env_example, env_file
+    return env_example, env_file, prompt_file
 
 
-def test_parse_env_example_skips_comments_and_blanks(env_paths):
-    entries = setup.parse_env_example()
-    assert entries == [("TELEGRAM_BOT_TOKEN", ""), ("AGENT_NAME", "Assistant")]
+def env_dict(env_file) -> dict[str, str]:
+    result = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        result[key] = value
+    return result
+
+
+def scripted_input(monkeypatch, responses):
+    it = iter(responses)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(it))
+
+
+def test_parse_env_example_skips_comments_and_blanks(tmp_path, monkeypatch):
+    env_example = tmp_path / ".env.example"
+    env_example.write_text("# a comment\n\nTELEGRAM_BOT_TOKEN=\nAGENT_NAME=Assistant\n", encoding="utf-8")
+    monkeypatch.setattr(setup, "ENV_EXAMPLE", env_example)
+
+    assert setup.parse_env_example() == [("TELEGRAM_BOT_TOKEN", ""), ("AGENT_NAME", "Assistant")]
 
 
 def test_ask_uses_input_value(monkeypatch):
@@ -55,6 +81,32 @@ def test_ask_uses_key_as_label_for_unknown_key(monkeypatch):
     assert seen_prompt["value"] == "SOME_UNKNOWN_KEY: "
 
 
+def test_ask_llm_backend_accepts_explicit_value(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "cloud")
+    assert setup.ask_llm_backend("ollama") == "cloud"
+
+
+def test_ask_llm_backend_accepts_local_alias_for_ollama(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "local")
+    assert setup.ask_llm_backend("ollama") == "ollama"
+
+
+def test_ask_llm_backend_falls_back_to_default_on_empty_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert setup.ask_llm_backend("cloud") == "cloud"
+
+
+def test_ask_llm_backend_ignores_bogus_default(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert setup.ask_llm_backend("not-a-real-backend") == "ollama"
+
+
+def test_ask_llm_backend_reprompts_on_invalid_value(monkeypatch, capsys):
+    scripted_input(monkeypatch, ["nope", "local"])
+    assert setup.ask_llm_backend("ollama") == "ollama"
+    assert "Please type 'local' or 'cloud'" in capsys.readouterr().out
+
+
 def test_ensure_system_prompt_copies_from_example(env_paths):
     setup.ensure_system_prompt()
     assert setup.SYSTEM_PROMPT_FILE.read_text(encoding="utf-8") == "You are {{AGENT_NAME}}."
@@ -72,18 +124,26 @@ def test_ensure_system_prompt_noop_without_example(env_paths):
     assert not setup.SYSTEM_PROMPT_FILE.exists()
 
 
-def test_main_creates_system_prompt_on_first_run(env_paths, monkeypatch):
-    responses = iter(["my-token", "Rex"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
-    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+def test_apply_personality_appends_when_given(env_paths):
+    setup.SYSTEM_PROMPT_FILE.write_text("base prompt", encoding="utf-8")
+    setup.apply_personality("Be extra playful.")
+    content = setup.SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
+    assert content == "base prompt\nBe extra playful.\n"
 
-    setup.main()
 
-    assert setup.SYSTEM_PROMPT_FILE.exists()
+def test_apply_personality_noop_when_blank(env_paths):
+    setup.SYSTEM_PROMPT_FILE.write_text("base prompt", encoding="utf-8")
+    setup.apply_personality("")
+    assert setup.SYSTEM_PROMPT_FILE.read_text(encoding="utf-8") == "base prompt"
+
+
+def test_apply_personality_noop_when_file_missing(env_paths):
+    setup.apply_personality("Be extra playful.")
+    assert not setup.SYSTEM_PROMPT_FILE.exists()
 
 
 def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
-    _, env_file = env_paths
+    _, env_file, _ = env_paths
     env_file.write_text("EXISTING=1\n", encoding="utf-8")
 
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
@@ -94,63 +154,99 @@ def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
     assert "Cancelled" in capsys.readouterr().out
 
 
-def test_main_accepts_overwrite_and_proceeds(env_paths, monkeypatch, capsys):
-    _, env_file = env_paths
-    env_file.write_text("EXISTING=1\n", encoding="utf-8")
-
-    responses = iter(["y", "my-token", "Rex"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
+    _, env_file, prompt_file = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    scripted_input(
+        monkeypatch,
+        [
+            "my-token",  # TELEGRAM_BOT_TOKEN
+            "",  # ALLOWED_USER_IDS (default)
+            "Rex",  # AGENT_NAME
+            "",  # LLM_BACKEND (default: ollama)
+            "qwen3:8b",  # OLLAMA_MODEL
+            "",  # personality (skip)
+        ],
+    )
 
     setup.main()
 
-    content = env_file.read_text(encoding="utf-8")
-    assert "TELEGRAM_BOT_TOKEN=my-token" in content
-    assert "== Agent configuration ==" in capsys.readouterr().out
-
-
-def test_main_writes_env_and_skips_launch_without_docker(env_paths, monkeypatch, capsys):
-    _, env_file = env_paths
-    responses = iter(["my-token", "Rex"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
-    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
-    run_mock = MagicMock()
-    monkeypatch.setattr(setup.subprocess, "run", run_mock)
-
-    setup.main()
-
-    content = env_file.read_text(encoding="utf-8")
-    assert "TELEGRAM_BOT_TOKEN=my-token" in content
-    assert "AGENT_NAME=Rex" in content
-    run_mock.assert_not_called()
+    values = env_dict(env_file)
+    assert values["TELEGRAM_BOT_TOKEN"] == "my-token"
+    assert values["AGENT_NAME"] == "Rex"
+    assert values["LLM_BACKEND"] == "ollama"
+    assert values["OLLAMA_MODEL"] == "qwen3:8b"
+    assert values["SYSTEM_PROMPT_FILE"] == "app/prompts/system_prompt.txt"
+    assert values["CLOUD_API_KEY"] == ""
+    assert prompt_file.read_text(encoding="utf-8") == "You are {{AGENT_NAME}}."
     assert "Docker was not found" in capsys.readouterr().out
 
 
-def test_main_creates_env_when_missing_without_prompting_overwrite(env_paths, monkeypatch):
-    responses = iter(["my-token", "Rex", "n"])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
+def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkeypatch, capsys):
+    _, env_file, prompt_file = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    scripted_input(
+        monkeypatch,
+        [
+            "my-token",
+            "123,456",
+            "Rex2",
+            "cloud",
+            "sk-key",
+            "gpt-4o",
+            "Be extra playful.",
+            "",  # launch docker (default: yes)
+        ],
+    )
 
     setup.main()
 
-    run_mock.assert_not_called()
-
-
-def test_main_launches_docker_compose_when_confirmed(env_paths, monkeypatch, capsys):
-    responses = iter(["my-token", "Rex", ""])
-    monkeypatch.setattr("builtins.input", lambda prompt: next(responses))
-    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
-    run_mock = MagicMock()
-    monkeypatch.setattr(setup.subprocess, "run", run_mock)
-
-    setup.main()
+    values = env_dict(env_file)
+    assert values["LLM_BACKEND"] == "cloud"
+    assert values["CLOUD_API_KEY"] == "sk-key"
+    assert values["CLOUD_MODEL"] == "gpt-4o"
+    assert values["OLLAMA_MODEL"] == "llama3"  # untouched default
+    assert prompt_file.read_text(encoding="utf-8") == "You are {{AGENT_NAME}}.\nBe extra playful.\n"
 
     run_mock.assert_called_once_with(
         ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
     )
     assert "Agent is up" in capsys.readouterr().out
+
+
+def test_main_declines_docker_launch(env_paths, monkeypatch, capsys):
+    _, env_file, _ = env_paths
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
+    run_mock = MagicMock()
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "llama3", "", "n"])
+
+    setup.main()
+
+    run_mock.assert_not_called()
+    assert "When you're ready" in capsys.readouterr().out
+
+
+def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monkeypatch):
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    scripted_input(
+        monkeypatch,
+        ["my-token", "", "Rex", "nope", "local", "llama3", ""],
+    )
+
+    setup.main()  # must not raise
+
+
+def test_main_accepts_local_as_ollama_alias(env_paths, monkeypatch):
+    _, env_file, _ = env_paths
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "llama3", ""])
+
+    setup.main()
+
+    assert env_dict(env_file)["LLM_BACKEND"] == "ollama"
 
 
 def test_cli_returns_zero_on_success(monkeypatch):
