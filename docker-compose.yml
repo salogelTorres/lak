@@ -1,0 +1,25 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      # so you can tweak the system prompt without rebuilding the image
+      - ./app/prompts:/app/app/prompts:ro
+
+  # Optional: run Ollama itself in Docker instead of using one already
+  # installed on the host. Uncomment if you want everything containerized.
+  # (On Windows/Mac with Docker Desktop, a host-installed Ollama is already
+  # reachable from the bot via OLLAMA_BASE_URL=http://host.docker.internal:11434,
+  # so this is usually not needed.)
+  #
+  # ollama:
+  #   image: ollama/ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   ports:
+  #     - "11434:11434"
+
+# volumes:
+#   ollama_data:
