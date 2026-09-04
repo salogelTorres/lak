@@ -21,7 +21,7 @@ def _is_allowed(config: Config, user_id: int) -> bool:
     return not config.allowed_user_ids or user_id in config.allowed_user_ids
 
 
-async def _warm_up_ollama(llm_client: LLMClient) -> None:
+async def _warm_up_ollama(llm_client: LLMClient, *, retries: int = 10, delay_seconds: float = 3) -> None:
     """Load the model into memory/VRAM right away on startup.
 
     Otherwise the *first* real message after a fresh `docker compose up` (or
@@ -29,12 +29,21 @@ async def _warm_up_ollama(llm_client: LLMClient) -> None:
     several-GB model can be a minute or more on top of generation time.
     Runs as a fire-and-forget background task; if it fails, the bot still
     works, just slow on that first message like before.
+
+    Retries because Compose starts the bot and ollama containers together —
+    the ollama service can still be a few seconds from accepting connections
+    when this first fires.
     """
-    try:
-        await llm_client.chat([{"role": "user", "content": "Hi"}])
-        logger.info("Model warmed up.")
-    except Exception:
-        logger.warning("Model warm-up failed; the first reply may be slow.", exc_info=True)
+    for attempt in range(retries):
+        try:
+            await llm_client.chat([{"role": "user", "content": "Hi"}])
+            logger.info("Model warmed up.")
+            return
+        except Exception:
+            if attempt == retries - 1:
+                logger.warning("Model warm-up failed; the first reply may be slow.", exc_info=True)
+                return
+            await asyncio.sleep(delay_seconds)
 
 
 async def _keep_typing(bot, chat_id: int) -> None:

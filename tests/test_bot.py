@@ -215,14 +215,38 @@ async def test_warm_up_ollama_sends_a_throwaway_message_and_logs(caplog):
     assert "warmed up" in caplog.text.lower()
 
 
-async def test_warm_up_ollama_logs_warning_on_failure(caplog):
+async def test_warm_up_ollama_retries_while_ollama_is_still_starting(monkeypatch, caplog):
+    llm_client = AsyncMock()
+    llm_client.chat.side_effect = [ConnectionError("not up yet"), ConnectionError("not up yet"), "hi there"]
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("app.bot.asyncio.sleep", sleep_mock)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await _warm_up_ollama(llm_client, retries=5, delay_seconds=0)
+
+    assert llm_client.chat.await_count == 3
+    assert sleep_mock.await_count == 2
+    assert "warmed up" in caplog.text.lower()
+
+
+async def test_warm_up_ollama_logs_warning_after_exhausting_retries(monkeypatch, caplog):
     llm_client = AsyncMock()
     llm_client.chat.side_effect = RuntimeError("boom")
+    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
 
     with caplog.at_level(logging.WARNING, logger="app.bot"):
-        await _warm_up_ollama(llm_client)  # must not raise
+        await _warm_up_ollama(llm_client, retries=3, delay_seconds=0)  # must not raise
 
+    assert llm_client.chat.await_count == 3
     assert "warm-up failed" in caplog.text.lower()
+
+
+async def test_warm_up_ollama_noop_with_zero_retries():
+    llm_client = AsyncMock()
+
+    await _warm_up_ollama(llm_client, retries=0)
+
+    llm_client.chat.assert_not_called()
 
 
 async def test_post_init_warms_up_ollama_backend():
