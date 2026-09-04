@@ -20,6 +20,14 @@ services:
   ollama:
     image: ollama/ollama
     restart: unless-stopped
+    environment:
+      # Ollama unloads a model from memory/VRAM after 5 minutes idle by
+      # default, so it has to be reloaded (can be a minute or more) on the
+      # next message. This is a dedicated instance for the bot, so keep
+      # whatever's loaded resident indefinitely instead. The bot also
+      # warms the model up on startup (see app/bot.py), so together the
+      # only slow reply should be right after `docker compose up`.
+      - OLLAMA_KEEP_ALIVE=-1
     volumes:
       - ollama_data:/root/.ollama
     ports:

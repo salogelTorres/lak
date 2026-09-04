@@ -43,7 +43,15 @@ OpenRouter, proxies, etc.), running in Docker.
   WSL2 sets this up for you), `setup.py` detects it and enables GPU
   acceleration automatically. A CPU-only 8B model can take 20-30+ seconds
   per reply; the same model on GPU is typically well under a second per
-  token.
+  token. Loading the model into memory the first time (after
+  `docker compose up`, or once it's unloaded) is a separate, one-off cost
+  on top of that — a few GB model can take a minute or more just to load.
+  The bot warms the model up on startup so that cost lands during container
+  startup rather than on the first Telegram message, and
+  `OLLAMA_KEEP_ALIVE=-1` (set in `docker-compose.yml`) keeps it loaded
+  indefinitely afterwards instead of Ollama's default 5-minute idle
+  timeout — so in practice only a fresh `docker compose up`/restart pays
+  it, not every conversation after a quiet period.
 - If you plan to use `LLM_BACKEND=cloud`: an API key for an OpenAI-compatible
   provider (OpenAI, OpenRouter, etc.).
 

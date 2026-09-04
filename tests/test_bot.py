@@ -1,11 +1,12 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram.constants import ChatAction
 from telegram.ext import CommandHandler, MessageHandler
 
-from app.bot import _is_allowed, build_application
+from app.bot import _is_allowed, _warm_up_ollama, build_application
 from app.config import Config
 
 
@@ -201,6 +202,49 @@ async def test_handle_message_stops_typing_action_on_llm_error():
     await handle_message(make_update(), context)
 
     context.bot.send_chat_action.assert_awaited_with(chat_id=42, action=ChatAction.TYPING)
+
+
+async def test_warm_up_ollama_sends_a_throwaway_message_and_logs(caplog):
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "hi there"
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await _warm_up_ollama(llm_client)
+
+    llm_client.chat.assert_awaited_once_with([{"role": "user", "content": "Hi"}])
+    assert "warmed up" in caplog.text.lower()
+
+
+async def test_warm_up_ollama_logs_warning_on_failure(caplog):
+    llm_client = AsyncMock()
+    llm_client.chat.side_effect = RuntimeError("boom")
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await _warm_up_ollama(llm_client)  # must not raise
+
+    assert "warm-up failed" in caplog.text.lower()
+
+
+async def test_post_init_warms_up_ollama_backend():
+    config = make_config(llm_backend="ollama")
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+
+    await app.post_init(app)
+    await asyncio.sleep(0)  # let the fire-and-forget warm-up task run
+
+    llm_client.chat.assert_awaited_once_with([{"role": "user", "content": "Hi"}])
+
+
+async def test_post_init_skips_warmup_for_cloud_backend():
+    config = make_config(llm_backend="cloud")
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+
+    await app.post_init(app)
+    await asyncio.sleep(0)
+
+    llm_client.chat.assert_not_called()
 
 
 async def test_handle_message_trims_history():
