@@ -1,0 +1,16 @@
+# Copy this file to docker-compose.override.yml to give the `ollama`
+# service access to an NVIDIA GPU (requires the NVIDIA Container Toolkit on
+# the host). Compose merges docker-compose.override.yml automatically, no
+# extra flags needed on `docker compose up`/`restart`/etc.
+#
+# setup.py does this for you automatically when it detects a working
+# NVIDIA GPU + Docker runtime.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

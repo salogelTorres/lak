@@ -6,7 +6,8 @@ Usage:
 
 Asks only for the values that make sense to customize per agent, writes the
 result to .env (keeping every other key at its .env.example default),
-creates app/prompts/system_prompt.txt from its template on first run, and
+creates app/prompts/system_prompt.txt from its template on first run, enables
+NVIDIA GPU acceleration for Ollama automatically when one is detected, and
 optionally starts the agent with `docker compose up -d --build` (pulling the
 Ollama model automatically when that's the chosen backend).
 """
@@ -24,6 +25,8 @@ ENV_EXAMPLE = ROOT / ".env.example"
 ENV_FILE = ROOT / ".env"
 SYSTEM_PROMPT_EXAMPLE = ROOT / "app" / "prompts" / "system_prompt.txt.example"
 SYSTEM_PROMPT_FILE = ROOT / "app" / "prompts" / "system_prompt.txt"
+GPU_OVERRIDE_EXAMPLE = ROOT / "docker-compose.override.yml.example"
+GPU_OVERRIDE_FILE = ROOT / "docker-compose.override.yml"
 
 # Keys always asked, regardless of LLM backend. SYSTEM_PROMPT_FILE, the
 # *_BASE_URL keys, etc. are intentionally not here: they're internal wiring,
@@ -109,6 +112,25 @@ def apply_personality(instructions: str) -> None:
             f.write(f"\n{instructions}\n")
 
 
+def detect_nvidia_gpu() -> bool:
+    """Best-effort check for a usable NVIDIA GPU + driver on the host."""
+    return shutil.which("nvidia-smi") is not None
+
+
+def ensure_gpu_override() -> bool:
+    """Enable GPU acceleration for the ollama service if an NVIDIA GPU is
+    detected. Never overwrites a docker-compose.override.yml you already
+    have (hand-edited or from a previous run). Returns whether it created
+    one just now.
+    """
+    if GPU_OVERRIDE_FILE.exists() or not detect_nvidia_gpu() or not GPU_OVERRIDE_EXAMPLE.exists():
+        return False
+    GPU_OVERRIDE_FILE.write_text(
+        GPU_OVERRIDE_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return True
+
+
 def pull_ollama_model(model: str, *, retries: int = 10, delay_seconds: float = 3) -> bool:
     """Download `model` into the ollama service's volume.
 
@@ -166,6 +188,9 @@ def main() -> None:
         print("Docker was not found on PATH. Install Docker Desktop and then run:")
         print("  docker compose up -d --build")
         return
+
+    if values["LLM_BACKEND"] == "ollama" and ensure_gpu_override():
+        print("NVIDIA GPU detected — enabling GPU acceleration for Ollama.")
 
     launch = input("\nStart the agent now with docker compose? (Y/n): ").strip().lower()
     if launch in ("", "y"):

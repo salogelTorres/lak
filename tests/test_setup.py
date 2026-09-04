@@ -18,6 +18,15 @@ CLOUD_MODEL=gpt-4o-mini
 """
 
 
+GPU_OVERRIDE_CONTENT = "services:\n  ollama:\n    deploy:\n      resources: {}\n"
+
+
+def which_only_docker(name: str) -> str | None:
+    """Default `shutil.which` stand-in: docker is on PATH, nothing else is
+    (in particular, no nvidia-smi — no GPU detected)."""
+    return "/usr/bin/docker" if name == "docker" else None
+
+
 @pytest.fixture
 def env_paths(tmp_path, monkeypatch):
     env_example = tmp_path / ".env.example"
@@ -30,12 +39,19 @@ def env_paths(tmp_path, monkeypatch):
     prompt_example.write_text("You are {{AGENT_NAME}}.", encoding="utf-8")
     prompt_file = prompt_dir / "system_prompt.txt"
 
+    gpu_override_example = tmp_path / "docker-compose.override.yml.example"
+    gpu_override_example.write_text(GPU_OVERRIDE_CONTENT, encoding="utf-8")
+    gpu_override_file = tmp_path / "docker-compose.override.yml"
+
     monkeypatch.setattr(setup, "ENV_EXAMPLE", env_example)
     monkeypatch.setattr(setup, "ENV_FILE", env_file)
     monkeypatch.setattr(setup, "ROOT", tmp_path)
     monkeypatch.setattr(setup, "SYSTEM_PROMPT_EXAMPLE", prompt_example)
     monkeypatch.setattr(setup, "SYSTEM_PROMPT_FILE", prompt_file)
-    return env_example, env_file, prompt_file
+    monkeypatch.setattr(setup, "GPU_OVERRIDE_EXAMPLE", gpu_override_example)
+    monkeypatch.setattr(setup, "GPU_OVERRIDE_FILE", gpu_override_file)
+    monkeypatch.setattr(setup.shutil, "which", which_only_docker)
+    return env_example, env_file, prompt_file, gpu_override_file
 
 
 def env_dict(env_file) -> dict[str, str]:
@@ -180,8 +196,50 @@ def test_pull_ollama_model_gives_up_after_retries(monkeypatch, capsys):
     assert "Could not pull the model automatically" in capsys.readouterr().out
 
 
+def test_detect_nvidia_gpu_true_when_nvidia_smi_present(monkeypatch):
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    assert setup.detect_nvidia_gpu() is True
+
+
+def test_detect_nvidia_gpu_false_when_absent(monkeypatch):
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    assert setup.detect_nvidia_gpu() is False
+
+
+def test_ensure_gpu_override_creates_file_when_gpu_detected(env_paths, monkeypatch):
+    *_, gpu_override_file = env_paths
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
+
+    assert setup.ensure_gpu_override() is True
+    assert gpu_override_file.read_text(encoding="utf-8") == GPU_OVERRIDE_CONTENT
+
+
+def test_ensure_gpu_override_noop_without_gpu(env_paths, monkeypatch):
+    *_, gpu_override_file = env_paths
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: False)
+
+    assert setup.ensure_gpu_override() is False
+    assert not gpu_override_file.exists()
+
+
+def test_ensure_gpu_override_does_not_overwrite_existing_file(env_paths, monkeypatch):
+    *_, gpu_override_file = env_paths
+    gpu_override_file.write_text("custom override", encoding="utf-8")
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
+
+    assert setup.ensure_gpu_override() is False
+    assert gpu_override_file.read_text(encoding="utf-8") == "custom override"
+
+
+def test_ensure_gpu_override_noop_without_example(env_paths, monkeypatch):
+    setup.GPU_OVERRIDE_EXAMPLE.unlink()
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
+
+    assert setup.ensure_gpu_override() is False
+
+
 def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
-    _, env_file, _ = env_paths
+    _, env_file, _, _ = env_paths
     env_file.write_text("EXISTING=1\n", encoding="utf-8")
 
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
@@ -193,7 +251,7 @@ def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
 
 
 def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
-    _, env_file, prompt_file = env_paths
+    _, env_file, prompt_file, _ = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
     scripted_input(
         monkeypatch,
@@ -221,8 +279,9 @@ def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
 
 
 def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkeypatch, capsys):
-    _, env_file, prompt_file = env_paths
-    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
+    _, env_file, prompt_file, gpu_override_file = env_paths
+    # even with a GPU present, the cloud backend never checks for one
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     pull_mock = MagicMock()
@@ -254,12 +313,12 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
         ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
     )
     pull_mock.assert_not_called()
+    assert not gpu_override_file.exists()
     assert "Agent is up" in capsys.readouterr().out
 
 
 def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypatch, capsys):
-    _, env_file, _ = env_paths
-    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
+    _, env_file, _, gpu_override_file = env_paths
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     pull_mock = MagicMock(return_value=True)
@@ -275,12 +334,26 @@ def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypat
         ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
     )
     pull_mock.assert_called_once_with("qwen3:8b")
+    # no GPU in this fixture (which_only_docker), so no override file
+    assert not gpu_override_file.exists()
     assert "Agent is up" in capsys.readouterr().out
 
 
+def test_main_ollama_backend_with_gpu_enables_override(env_paths, monkeypatch, capsys):
+    _, env_file, _, gpu_override_file = env_paths
+    monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
+    monkeypatch.setattr(setup.subprocess, "run", MagicMock())
+    monkeypatch.setattr(setup, "pull_ollama_model", MagicMock(return_value=True))
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "qwen3:8b", "", ""])
+
+    setup.main()
+
+    assert gpu_override_file.read_text(encoding="utf-8") == GPU_OVERRIDE_CONTENT
+    assert "NVIDIA GPU detected" in capsys.readouterr().out
+
+
 def test_main_declines_docker_launch(env_paths, monkeypatch, capsys):
-    _, env_file, _ = env_paths
-    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/docker")
+    _, env_file, _, gpu_override_file = env_paths
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     scripted_input(monkeypatch, ["my-token", "", "Rex", "", "llama3", "", "n"])
@@ -302,7 +375,7 @@ def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monk
 
 
 def test_main_accepts_local_as_ollama_alias(env_paths, monkeypatch):
-    _, env_file, _ = env_paths
+    _, env_file, _, _ = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
     scripted_input(monkeypatch, ["my-token", "", "Rex", "local", "llama3", ""])
 

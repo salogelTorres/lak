@@ -1,5 +1,6 @@
 .env
 app/prompts/system_prompt.txt
+docker-compose.override.yml
 __pycache__/
 *.pyc
 .venv/

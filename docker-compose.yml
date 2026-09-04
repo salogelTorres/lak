@@ -24,15 +24,12 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
-    # Uncomment for NVIDIA GPU acceleration (requires the NVIDIA Container
-    # Toolkit on the host):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # GPU acceleration (NVIDIA): setup.py detects an NVIDIA GPU + the
+    # NVIDIA Container Toolkit and writes docker-compose.override.yml with
+    # the `deploy.resources.reservations.devices` block for this service —
+    # Compose merges it automatically, no flags needed. Without a GPU,
+    # Ollama runs on CPU, which is much slower for anything past a small
+    # model. See docker-compose.override.yml.example to add it by hand.
 
 volumes:
   ollama_data:
