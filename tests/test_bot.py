@@ -1,6 +1,8 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram.constants import ChatAction
 from telegram.ext import CommandHandler, MessageHandler
 
 from app.bot import _is_allowed, build_application
@@ -31,6 +33,12 @@ def make_update(*, user_id=1, text="hello"):
     update.message.text = text
     update.message.reply_text = AsyncMock()
     return update
+
+
+def make_context():
+    context = MagicMock()
+    context.bot.send_chat_action = AsyncMock()
+    return context
 
 
 def get_handlers(app):
@@ -76,7 +84,7 @@ async def test_start_replies_with_greeting():
     start, _ = get_handlers(app)
 
     update = make_update()
-    await start(update, MagicMock())
+    await start(update, make_context())
 
     update.message.reply_text.assert_awaited_once_with("Hi, I'm Rex. How can I help?")
 
@@ -88,7 +96,7 @@ async def test_handle_message_replies_with_llm_output():
     _, handle_message = get_handlers(app)
 
     update = make_update(text="what's up?")
-    await handle_message(update, MagicMock())
+    await handle_message(update, make_context())
 
     llm_client.chat.assert_awaited_once()
     sent_messages = calls[0]
@@ -103,8 +111,8 @@ async def test_handle_message_keeps_history_across_calls():
     app = build_application(config, llm_client)
     _, handle_message = get_handlers(app)
 
-    await handle_message(make_update(text="one"), MagicMock())
-    await handle_message(make_update(text="two"), MagicMock())
+    await handle_message(make_update(text="one"), make_context())
+    await handle_message(make_update(text="two"), make_context())
 
     second_call_messages = calls[1]
     roles_and_content = [(m["role"], m["content"]) for m in second_call_messages]
@@ -120,7 +128,7 @@ async def test_handle_message_denies_disallowed_user():
     _, handle_message = get_handlers(app)
 
     update = make_update(user_id=1)
-    await handle_message(update, MagicMock())
+    await handle_message(update, make_context())
 
     llm_client.chat.assert_not_called()
     update.message.reply_text.assert_awaited_once_with("You don't have access to this bot.")
@@ -134,7 +142,7 @@ async def test_handle_message_denies_when_user_is_none():
 
     update = make_update()
     update.effective_user = None
-    await handle_message(update, MagicMock())
+    await handle_message(update, make_context())
 
     llm_client.chat.assert_not_called()
     update.message.reply_text.assert_awaited_once_with("You don't have access to this bot.")
@@ -148,11 +156,51 @@ async def test_handle_message_reports_llm_error():
     _, handle_message = get_handlers(app)
 
     update = make_update()
-    await handle_message(update, MagicMock())
+    await handle_message(update, make_context())
 
     update.message.reply_text.assert_awaited_once_with(
         "Something went wrong talking to the model. Please try again."
     )
+
+
+async def test_handle_message_sends_typing_action_while_waiting():
+    config = make_config()
+    llm_client = AsyncMock()
+
+    async def slow_chat(messages):
+        # a real await point, so the concurrently-scheduled typing task gets
+        # a chance to run before this resolves — unlike a mock that returns
+        # without ever suspending (which is what a real, slow LLM call never
+        # does in practice).
+        await asyncio.sleep(0)
+        return "the answer"
+
+    llm_client.chat = AsyncMock(side_effect=slow_chat)
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    context = make_context()
+    await handle_message(make_update(), context)
+
+    context.bot.send_chat_action.assert_awaited_with(chat_id=42, action=ChatAction.TYPING)
+
+
+async def test_handle_message_stops_typing_action_on_llm_error():
+    config = make_config()
+    llm_client = AsyncMock()
+
+    async def slow_failing_chat(messages):
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    llm_client.chat = AsyncMock(side_effect=slow_failing_chat)
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    context = make_context()
+    await handle_message(make_update(), context)
+
+    context.bot.send_chat_action.assert_awaited_with(chat_id=42, action=ChatAction.TYPING)
 
 
 async def test_handle_message_trims_history():
@@ -162,7 +210,7 @@ async def test_handle_message_trims_history():
     _, handle_message = get_handlers(app)
 
     for i in range(25):
-        await handle_message(make_update(text=f"msg-{i}"), MagicMock())
+        await handle_message(make_update(text=f"msg-{i}"), make_context())
 
     last_messages = calls[-1]
     assert last_messages[0] == {"role": "system", "content": "You are Rex."}

@@ -62,6 +62,15 @@ def patch_async_client(monkeypatch):
     return _patch
 
 
+def test_ollama_client_read_timeout_tolerates_cold_model_load():
+    # A cold model load (nothing in memory/VRAM yet) can take a minute or
+    # more before generating a single token; the read timeout must comfortably
+    # exceed that on top of generation time, or the very first request after
+    # `docker compose up` fails outright.
+    assert OllamaClient.TIMEOUT.read >= 200
+    assert OllamaClient.TIMEOUT.connect <= 30
+
+
 async def test_ollama_client_chat(patch_async_client):
     import app.llm as llm_module
 

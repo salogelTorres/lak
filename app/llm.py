@@ -14,12 +14,19 @@ class LLMClient(Protocol):
 
 
 class OllamaClient:
+    # A cold model (nothing loaded into memory/VRAM yet, e.g. right after
+    # `docker compose up`) can take a minute or more just to load before it
+    # generates a single token, on top of generation time itself — a short
+    # read timeout here fails that first request outright. Connect timeout
+    # stays short so an unreachable Ollama still fails fast.
+    TIMEOUT = httpx.Timeout(10.0, read=300.0)
+
     def __init__(self, base_url: str, model: str):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
     async def chat(self, messages: list[Message]) -> str:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
             resp = await client.post(
                 f"{self.base_url}/api/chat",
                 json={"model": self.model, "messages": messages, "stream": False},
