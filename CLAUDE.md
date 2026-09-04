@@ -90,8 +90,16 @@ required.
   retry/streaming logic.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
-  over inside `build_application` (lost on restart, capped at
-  `MAX_HISTORY_MESSAGES`), not a module-level or persisted store. `handle_message`
+  over inside `build_application` (lost on restart), not a module-level or
+  persisted store. It's capped by `_trim_to_token_budget()` against
+  `Config.max_history_tokens` (a rough ~4-chars/token estimate, not a real
+  tokenizer — see `_estimate_tokens`), dropping the *oldest* messages first
+  regardless of how many that is; the system message and the newest message
+  are always kept even if the newest alone exceeds budget. Trimming happens
+  *before* the LLM call in `_reply_to()`, so it bounds what's actually sent,
+  not just what's stored. This replaced an earlier fixed 20-message cap —
+  don't reintroduce a message-count limit; a handful of long messages can
+  blow a context window just as easily as many short ones. `handle_message`
   (text) and `handle_voice` (voice notes/audio files) both funnel through the
   shared `_reply_to()` closure (access control, history, typing indicator,
   LLM call, error handling, trimming) — add new input types the same way

@@ -11,9 +11,11 @@ import app.bot as bot_module
 from app.bot import (
     VOICE_TRANSCRIPTION_PREFIX,
     _build_system_message,
+    _estimate_tokens,
     _get_whisper_model,
     _is_allowed,
     _transcribe_sync,
+    _trim_to_token_budget,
     _warm_up_ollama,
     build_application,
     transcribe_voice,
@@ -56,6 +58,7 @@ def make_config(**overrides) -> Config:
         cloud_api_key="",
         cloud_model="gpt-4o-mini",
         whisper_model="small",
+        max_history_tokens=2000,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -394,26 +397,70 @@ async def test_post_init_skips_warmup_for_cloud_backend():
     llm_client.chat.assert_not_called()
 
 
-async def test_handle_message_trims_history(monkeypatch):
+def _msg(role: str, content: str) -> dict[str, str]:
+    return {"role": role, "content": content}
+
+
+def test_estimate_tokens_uses_chars_per_token_heuristic():
+    assert _estimate_tokens("") == 1  # never zero — an empty message still costs something
+    assert _estimate_tokens("abcd") == 1
+    assert _estimate_tokens("a" * 40) == 10
+
+
+def test_trim_to_token_budget_keeps_everything_when_it_fits():
+    history = [_msg("system", "sys"), _msg("user", "hi"), _msg("assistant", "hello")]
+
+    assert _trim_to_token_budget(history, max_tokens=1000) == history
+
+
+def test_trim_to_token_budget_always_keeps_system_and_newest_even_if_over_budget():
+    history = [_msg("system", "s" * 4), _msg("user", "a" * 4000)]
+
+    result = _trim_to_token_budget(history, max_tokens=10)
+
+    assert result == history
+
+
+def test_trim_to_token_budget_drops_oldest_first_regardless_of_message_count():
+    history = [
+        _msg("system", "s"),
+        _msg("user", "a" * 4000),  # huge, oldest non-system message
+        _msg("assistant", "b" * 8),
+        _msg("user", "c" * 8),  # newest
+    ]
+
+    result = _trim_to_token_budget(history, max_tokens=10)
+
+    contents = [m["content"] for m in result]
+    assert "a" * 4000 not in contents  # the one huge message got dropped...
+    assert "b" * 8 in contents  # ...even though these two small ones fit
+    assert result[0]["role"] == "system"
+    assert result[-1]["content"] == "c" * 8
+
+
+def test_trim_to_token_budget_with_only_a_system_message():
+    history = [_msg("system", "sys")]
+
+    assert _trim_to_token_budget(history, max_tokens=1000) == history
+
+
+async def test_handle_message_trims_by_token_budget_not_message_count(monkeypatch):
     fixed = datetime(2026, 9, 4, 20, 30)
     freeze_now(monkeypatch, fixed)
-    config = make_config()
-    llm_client, calls = make_recording_llm_client([f"reply-{i}" for i in range(25)])
+    # A tiny budget forces trimming after just a couple of short messages —
+    # proving it's governed by tokens, not a fixed message-count cap.
+    config = make_config(max_history_tokens=30)
+    llm_client, calls = make_recording_llm_client([f"reply-{i}" for i in range(5)])
     app = build_application(config, llm_client)
     _, handle_message = get_handlers(app)
 
-    for i in range(25):
-        await handle_message(make_update(text=f"msg-{i}"), make_context())
+    for i in range(5):
+        await handle_message(make_update(text=f"message number {i}"), make_context())
 
     last_messages = calls[-1]
-    assert last_messages[0] == {
-        "role": "system",
-        "content": expected_system_content("You are Rex.", fixed, "UTC"),
-    }
-    # MAX_HISTORY_MESSAGES caps the *stored* history at 20; the list passed to
-    # chat() can be one longer right before that call's own trim happens.
-    assert len(last_messages) <= 21
-    assert not any(m.get("content") == "msg-0" for m in last_messages)
+    assert last_messages[0]["role"] == "system"
+    assert last_messages[-1]["content"] == "message number 4"
+    assert not any(m["content"] == "message number 0" for m in last_messages)
 
 
 class FakeSegment:

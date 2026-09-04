@@ -49,6 +49,7 @@ def make_config(**overrides) -> Config:
         cloud_api_key="sk-test",
         cloud_model="gpt-4o-mini",
         whisper_model="small",
+        max_history_tokens=2000,
     )
     defaults.update(overrides)
     return Config(**defaults)

@@ -129,6 +129,14 @@ OpenRouter, proxies, etc.), running in Docker.
   reasonable default on CPU. Every transcription is prefixed with
   `[Voice message, transcribed by Whisper]:` before being sent to the
   model, so it can tell text and voice messages apart.
+- **Conversation memory**: `MAX_HISTORY_TOKENS` in `.env` (default `2000`)
+  caps how much prior conversation gets sent with each message — a token
+  budget (~4 chars/token estimate), not a fixed number of messages, so a
+  few long messages and many short ones are trimmed consistently. Oldest
+  messages are dropped first; the system prompt and your latest message are
+  always kept. Lower this if you're on a small local context window,
+  raise it if your model/API supports a much larger one. History itself is
+  in-memory only and resets when the bot restarts.
 
 `.env`, `app/prompts/system_prompt.txt`, and `docker-compose.override.yml`
 are all gitignored — see

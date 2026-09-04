@@ -17,8 +17,13 @@ from app.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
-MAX_HISTORY_MESSAGES = 20
 TYPING_REFRESH_SECONDS = 4
+
+# Rough rule of thumb for BPE tokenizers (OpenAI's own guidance for
+# English/Spanish): ~4 characters per token. Real tokenizers differ per
+# model, but we only need a consistent budget to keep history within the
+# model's context window, not exact accounting.
+CHARS_PER_TOKEN_ESTIMATE = 4
 
 # Prepended to every voice-note transcription so the model can always tell a
 # message was spoken rather than typed — otherwise "listen to that audio I
@@ -56,6 +61,40 @@ async def transcribe_voice(audio_bytes: bytes, model_name: str) -> str:
     # loop so it doesn't freeze the bot (typing indicators, other chats)
     # while it works.
     return await asyncio.to_thread(_transcribe_sync, audio_bytes, model_name)
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text) // CHARS_PER_TOKEN_ESTIMATE)
+
+
+def _trim_to_token_budget(history: list[dict[str, str]], max_tokens: int) -> list[dict[str, str]]:
+    """Keep the system message (index 0) and as much of the *most recent*
+    history as fits in max_tokens, dropping the oldest messages first —
+    regardless of how many messages that ends up being.
+
+    The newest message (the current turn) is always kept even if it alone
+    exceeds the budget: better to slightly overrun than to silently drop
+    the question the user just asked.
+    """
+    system_message = history[0]
+    rest = history[1:]
+    if not rest:
+        return [system_message]
+
+    budget = max_tokens - _estimate_tokens(system_message["content"])
+    newest = rest[-1]
+    kept = [newest]
+    budget -= _estimate_tokens(newest["content"])
+
+    for message in reversed(rest[:-1]):
+        cost = _estimate_tokens(message["content"])
+        if cost > budget:
+            break
+        kept.append(message)
+        budget -= cost
+
+    kept.reverse()
+    return [system_message, *kept]
 
 
 def _build_system_message(config: Config) -> dict[str, str]:
@@ -129,6 +168,10 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
         history = histories.setdefault(chat_id, [None])
         history[0] = _build_system_message(config)
         history.append({"role": "user", "content": text})
+        # bound what we're about to send *before* sending it, not after —
+        # trims oldest messages first, whatever number of them that is
+        history = _trim_to_token_budget(history, config.max_history_tokens)
+        histories[chat_id] = history
 
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
         try:
@@ -143,10 +186,6 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
                 await typing_task
 
         history.append({"role": "assistant", "content": reply})
-        # trim history, always keeping the system prompt at index 0
-        if len(history) > MAX_HISTORY_MESSAGES:
-            histories[chat_id] = [history[0], *history[-(MAX_HISTORY_MESSAGES - 1):]]
-
         await update.message.reply_text(reply)
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

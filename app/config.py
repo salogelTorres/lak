@@ -27,6 +27,7 @@ class Config:
     cloud_api_key: str
     cloud_model: str
     whisper_model: str
+    max_history_tokens: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -46,6 +47,14 @@ class Config:
         if backend not in {"ollama", "cloud"}:
             raise RuntimeError(f"Invalid LLM_BACKEND: {backend!r} (use 'ollama' or 'cloud')")
 
+        raw_max_history_tokens = os.environ.get("MAX_HISTORY_TOKENS", "2000").strip()
+        try:
+            max_history_tokens = int(raw_max_history_tokens)
+        except ValueError:
+            raise RuntimeError(
+                f"Invalid MAX_HISTORY_TOKENS: {raw_max_history_tokens!r} (must be a whole number)"
+            )
+
         return cls(
             telegram_token=token,
             allowed_user_ids=_split_ids(os.environ.get("ALLOWED_USER_IDS", "")),
@@ -59,4 +68,5 @@ class Config:
             cloud_api_key=os.environ.get("CLOUD_API_KEY", ""),
             cloud_model=os.environ.get("CLOUD_MODEL", "gpt-4o-mini"),
             whisper_model=os.environ.get("WHISPER_MODEL", "small"),
+            max_history_tokens=max_history_tokens,
         )

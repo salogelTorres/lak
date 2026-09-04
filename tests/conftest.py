@@ -6,6 +6,7 @@ ENV_KEYS = [
     "AGENT_NAME",
     "SYSTEM_PROMPT_FILE",
     "TZ",
+    "MAX_HISTORY_TOKENS",
     "LLM_BACKEND",
     "OLLAMA_BASE_URL",
     "OLLAMA_MODEL",
