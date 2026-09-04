@@ -219,7 +219,11 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
 
     async def post_init(application: Application) -> None:
         if config.llm_backend == "ollama":
-            asyncio.create_task(_warm_up_ollama(llm_client))
+            # asyncio only keeps a *weak* reference to a task once nothing
+            # else holds it, so an unstored fire-and-forget task can be
+            # garbage-collected mid-run (see the asyncio.create_task docs).
+            # Stash it on bot_data so it's guaranteed to run to completion.
+            application.bot_data["warm_up_task"] = asyncio.create_task(_warm_up_ollama(llm_client))
 
     app = Application.builder().token(config.telegram_token).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))

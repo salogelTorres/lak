@@ -381,7 +381,7 @@ async def test_post_init_warms_up_ollama_backend():
     app = build_application(config, llm_client)
 
     await app.post_init(app)
-    await asyncio.sleep(0)  # let the fire-and-forget warm-up task run
+    await app.bot_data["warm_up_task"]
 
     llm_client.chat.assert_awaited_once_with([{"role": "user", "content": "Hi"}])
 
@@ -395,6 +395,24 @@ async def test_post_init_skips_warmup_for_cloud_backend():
     await asyncio.sleep(0)
 
     llm_client.chat.assert_not_called()
+    assert "warm_up_task" not in app.bot_data
+
+
+async def test_post_init_keeps_a_strong_reference_to_the_warm_up_task():
+    # Regression test: asyncio only keeps a *weak* reference to a task, so a
+    # fire-and-forget task with no reference stored anywhere can be
+    # garbage-collected before it finishes (see asyncio.create_task docs).
+    # It must be stashed somewhere (bot_data) that outlives post_init().
+    config = make_config(llm_backend="ollama")
+    llm_client = AsyncMock()
+    app = build_application(config, llm_client)
+
+    await app.post_init(app)
+
+    task = app.bot_data["warm_up_task"]
+    assert isinstance(task, asyncio.Task)
+    assert not task.done()  # still referenced, not already GC'd/cancelled
+    await task
 
 
 def _msg(role: str, content: str) -> dict[str, str]:

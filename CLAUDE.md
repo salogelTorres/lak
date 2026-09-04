@@ -103,7 +103,12 @@ required.
   (text) and `handle_voice` (voice notes/audio files) both funnel through the
   shared `_reply_to()` closure (access control, history, typing indicator,
   LLM call, error handling, trimming) — add new input types the same way
-  rather than duplicating that logic. Voice notes are transcribed with
+  rather than duplicating that logic. `post_init` fires `_warm_up_ollama` via
+  `asyncio.create_task` and stores the task on `application.bot_data`, not
+  just as a local variable — asyncio only holds a *weak* reference to a
+  task otherwise, so an unstored fire-and-forget task can be
+  garbage-collected mid-run; keep this pattern for any future background
+  task started the same way. Voice notes are transcribed with
   `faster-whisper` (`_transcribe_sync`, run off the event loop via
   `asyncio.to_thread` since it's a blocking CPU call) and always prefixed
   with `VOICE_TRANSCRIPTION_PREFIX` before being added to history, so the
