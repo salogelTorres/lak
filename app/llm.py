@@ -10,7 +10,7 @@ Message = dict[str, str]
 
 
 class LLMClient(Protocol):
-    async def chat(self, messages: list[Message]) -> str: ...
+    async def chat(self, messages: list[Message]) -> str: ...  # pragma: no cover
 
 
 class OllamaClient:

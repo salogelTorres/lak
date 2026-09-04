@@ -13,7 +13,7 @@ def main() -> None:
     config = Config.load()
     llm_client = build_llm_client(config)
     app = build_application(config, llm_client)
-    logging.info("Arrancando %s (backend=%s)", config.agent_name, config.llm_backend)
+    logging.info("Starting %s (backend=%s)", config.agent_name, config.llm_backend)
     app.run_polling()
 
 

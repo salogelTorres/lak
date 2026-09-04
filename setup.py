@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Asistente interactivo para configurar un nuevo agente a partir de esta plantilla.
+"""Interactive wizard to configure a new agent from this template.
 
-Uso:
+Usage:
     python setup.py
 
-Lee .env.example, pregunta valor por valor (con el valor por defecto entre
-corchetes), escribe el resultado en .env y, si quieres, levanta el agente
-con `docker compose up -d --build`.
+Reads .env.example, asks for each value (showing the default in brackets),
+writes the result to .env, creates app/prompts/system_prompt.txt from its
+template on first run, and optionally starts the agent with
+`docker compose up -d --build`.
 """
 from __future__ import annotations
 
@@ -19,17 +20,19 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 ENV_EXAMPLE = ROOT / ".env.example"
 ENV_FILE = ROOT / ".env"
+SYSTEM_PROMPT_EXAMPLE = ROOT / "app" / "prompts" / "system_prompt.txt.example"
+SYSTEM_PROMPT_FILE = ROOT / "app" / "prompts" / "system_prompt.txt"
 
 PROMPTS = {
-    "TELEGRAM_BOT_TOKEN": "Token del bot de Telegram (de @BotFather)",
-    "ALLOWED_USER_IDS": "IDs de Telegram con acceso, separados por comas (vacío = cualquiera)",
-    "AGENT_NAME": "Nombre del agente",
-    "LLM_BACKEND": "Backend del LLM: 'ollama' (local) o 'cloud' (API con key)",
-    "OLLAMA_BASE_URL": "URL de Ollama",
-    "OLLAMA_MODEL": "Modelo de Ollama",
-    "CLOUD_API_BASE_URL": "URL base de la API cloud (OpenAI-compatible)",
-    "CLOUD_API_KEY": "API key del backend cloud",
-    "CLOUD_MODEL": "Modelo del backend cloud",
+    "TELEGRAM_BOT_TOKEN": "Telegram bot token (from @BotFather)",
+    "ALLOWED_USER_IDS": "Telegram IDs allowed to use the bot, comma-separated (empty = anyone)",
+    "AGENT_NAME": "Agent name",
+    "LLM_BACKEND": "LLM backend: 'ollama' (local) or 'cloud' (API with key)",
+    "OLLAMA_BASE_URL": "Ollama URL",
+    "OLLAMA_MODEL": "Ollama model",
+    "CLOUD_API_BASE_URL": "Cloud API base URL (OpenAI-compatible)",
+    "CLOUD_API_KEY": "Cloud backend API key",
+    "CLOUD_MODEL": "Cloud backend model",
 }
 
 LINE_RE = re.compile(r"^([A-Z_][A-Z0-9_]*)=(.*)$")
@@ -51,14 +54,26 @@ def ask(key: str, default: str) -> str:
     return value or default
 
 
+def ensure_system_prompt() -> None:
+    """Create system_prompt.txt from its template on first run only.
+
+    system_prompt.txt is gitignored on purpose: once you've personalized an
+    agent, pulling updates from the template repo must not overwrite it.
+    """
+    if not SYSTEM_PROMPT_FILE.exists() and SYSTEM_PROMPT_EXAMPLE.exists():
+        SYSTEM_PROMPT_FILE.write_text(
+            SYSTEM_PROMPT_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
 def main() -> None:
     if ENV_FILE.exists():
-        overwrite = input(".env ya existe. ¿Sobreescribirlo? (s/N): ").strip().lower()
-        if overwrite != "s":
-            print("Cancelado. Edita .env a mano si quieres cambiar algo.")
+        overwrite = input(".env already exists. Overwrite it? (y/N): ").strip().lower()
+        if overwrite != "y":
+            print("Cancelled. Edit .env by hand if you want to change something.")
             return
 
-    print("== Configuración del agente ==\n")
+    print("== Agent configuration ==\n")
     values: dict[str, str] = {}
     for key, default in parse_env_example():
         values[key] = ask(key, default)
@@ -67,23 +82,30 @@ def main() -> None:
         for key, value in values.items():
             f.write(f"{key}={value}\n")
 
-    print(f"\nListo. Configuración guardada en {ENV_FILE}.")
+    ensure_system_prompt()
+
+    print(f"\nDone. Configuration saved to {ENV_FILE}.")
 
     if shutil.which("docker") is None:
-        print("No se encontró Docker en el PATH. Instala Docker Desktop y luego ejecuta:")
+        print("Docker was not found on PATH. Install Docker Desktop and then run:")
         print("  docker compose up -d --build")
         return
 
-    launch = input("\n¿Levantar el agente ahora con docker compose? (S/n): ").strip().lower()
-    if launch in ("", "s"):
+    launch = input("\nStart the agent now with docker compose? (Y/n): ").strip().lower()
+    if launch in ("", "y"):
         subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=ROOT, check=False)
-        print("\nAgente en marcha. Revisa los logs con: docker compose logs -f")
+        print("\nAgent is up. Check logs with: docker compose logs -f")
     else:
-        print("Cuando quieras arrancarlo: docker compose up -d --build")
+        print("When you're ready: docker compose up -d --build")
+
+
+def _cli() -> int:
+    try:
+        main()
+        return 0
+    except KeyboardInterrupt:
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit(1)
+    sys.exit(_cli())

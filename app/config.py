@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,10 +31,10 @@ class Config:
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         if not token:
             raise RuntimeError(
-                "TELEGRAM_BOT_TOKEN no está configurado. Revisa tu archivo .env."
+                "TELEGRAM_BOT_TOKEN is not set. Check your .env file."
             )
 
-        agent_name = os.environ.get("AGENT_NAME", "Asistente").strip()
+        agent_name = os.environ.get("AGENT_NAME", "Assistant").strip()
 
         prompt_path = Path(os.environ.get("SYSTEM_PROMPT_FILE", "app/prompts/system_prompt.txt"))
         raw_prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
@@ -42,7 +42,7 @@ class Config:
 
         backend = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
         if backend not in {"ollama", "cloud"}:
-            raise RuntimeError(f"LLM_BACKEND inválido: {backend!r} (usa 'ollama' o 'cloud')")
+            raise RuntimeError(f"Invalid LLM_BACKEND: {backend!r} (use 'ollama' or 'cloud')")
 
         return cls(
             telegram_token=token,

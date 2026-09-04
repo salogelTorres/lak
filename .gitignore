@@ -1,4 +1,7 @@
 .env
+app/prompts/system_prompt.txt
 __pycache__/
 *.pyc
 .venv/
+.coverage
+.pytest_cache/

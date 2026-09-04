@@ -22,14 +22,14 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
     histories: dict[int, list[dict[str, str]]] = {}
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(f"Hola, soy {config.agent_name}. ¿En qué te ayudo?")
+        await update.message.reply_text(f"Hi, I'm {config.agent_name}. How can I help?")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         chat_id = update.effective_chat.id
 
         if user is None or not _is_allowed(config, user.id):
-            await update.message.reply_text("No tienes acceso a este bot.")
+            await update.message.reply_text("You don't have access to this bot.")
             return
 
         history = histories.setdefault(chat_id, [{"role": "system", "content": config.system_prompt}])
@@ -38,8 +38,8 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
         try:
             reply = await llm_client.chat(history)
         except Exception:
-            logger.exception("Fallo llamando al LLM")
-            await update.message.reply_text("Hubo un error hablando con el modelo. Inténtalo de nuevo.")
+            logger.exception("Failed calling the LLM")
+            await update.message.reply_text("Something went wrong talking to the model. Please try again.")
             return
 
         history.append({"role": "assistant", "content": reply})
