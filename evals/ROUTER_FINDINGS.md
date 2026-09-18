@@ -107,30 +107,64 @@ in the dataset, one miss is already 97.6% — "100% vs. 97.6%" here means
 "zero misses vs. one shared, arguably-ambiguous miss," not a reliability
 gap.
 
-## Conclusion (evolving — under active investigation as of the last edit)
+### v5 — round 3: Granite 4.2, Cogito, Gemma 3 ("NeoHorse-1-9B" doesn't exist)
 
-**`qwen3.5:4b` is the current best candidate**, ahead of every model
-tested so far on the accuracy/latency trade-off, though not a clean sweep
-on the strict "THINK recall first" rule this investigation adopted (see
-above). No verdict has been locked in — a further round (IBM Granite 4.2
-8B/3B, Cogito 8B, Gemma 3 4B, and an unverified "NeoHorse-1-9B") was
-proposed and is pending as of this save; existence in the Ollama registry
-has not yet been checked for any of them.
+Before running this round, every proposed tag was checked for existence
+in the Ollama registry first (a lesson from earlier rounds — don't spend
+a download on an unverified name). `neohorse-1:9b` and `neohorse:9b` both
+returned "pull model manifest: file does not exist" — no such model is
+published under either name; it was dropped without spending a download
+on it. The other four (`granite4.2:8b`, `granite4.2:3b`, `cogito:8b`,
+`gemma3:4b`) are real and were pulled and benchmarked the same way as
+every prior round.
+
+| Model | Scenario | Majority acc | THINK recall | NO_THINK recall | Median latency |
+|---|---|---|---|---|---|
+| granite4.2:8b | 33/67 CPU/GPU (6.2GB, doesn't fit) | 76.6% | **40.5%** | 100% | 1058ms |
+| granite4.2:3b | standalone, 100% GPU (2.5GB) | 92.5% | 85.7% | 96.9% | 293ms |
+| cogito:8b | 25/75 CPU/GPU (5.6GB, doesn't fit) | 81.3% | **52.4%** | 100% | 599ms |
+| gemma3:4b | standalone, 100% GPU (2.9GB) | 88.8% | 90.5% | 87.7% | 447ms |
+
+For reference, `qwen3.5:4b` (v4 champion): 96.3% / 97.6% / 95.4% / 450ms.
+
+None of these four come close to dethroning `qwen3.5:4b`. The notable,
+somewhat counterintuitive result: `granite4.2:8b` and `cogito:8b` — both
+8B-class, both explicitly marketed around reasoning/agentic behavior —
+collapse on THINK recall (40.5%, 52.4%) almost as badly as the smallest
+failed candidates from v2/v4. Neither size nor a "built for reasoning"
+pitch predicts anything about this specific meta-judgment task, and
+neither fits in 6GB VRAM either, so they lose on speed too. `granite4.2:3b`
+and `gemma3:4b` are competent (92.5%/88.8% accuracy) but clearly behind
+the champion on every axis — no trade-off worth taking.
+
+## Conclusion
+
+Nine alternative candidates have now been tested across three follow-up
+rounds (v2's `qwen3:0.6b`/old `qwen3:4b`, v3's GLiClass, v4's
+`qwen3.5:2b/9b`/`ministral-3:3b`/`phi4-mini`, v5's `granite4.2:8b/3b`/
+`cogito:8b`/`gemma3:4b`) beyond the original `qwen3:8b` baseline. Exactly
+one — **`qwen3.5:4b`** — beats it, and does so clearly: 96.3% vs 94.4%
+accuracy, 450ms vs 778ms latency (42% faster), at the cost of missing one
+THINK case out of 42 that is itself borderline/ambiguous (see v4). No
+other candidate has come within striking distance on more than one axis
+at a time. Given diminishing returns are now clear — three full rounds of
+alternatives (generational, architectural, and "reasoning-branded") all
+landed at or below the v4 champion — this is a reasonable point to stop
+searching and commit, absent a specific new reason to keep looking.
 
 **Not yet acted on:** wiring a router into `app/bot.py`/`app/llm.py` (was
-Paso 3 of the original plan) — deliberately not started while the model
-choice is still moving. GLiClass/torch (v3) were installed only inside
-the running container for that test, never added to the
-Dockerfile/requirements — nothing to roll back.
+Paso 3 of the original plan) — still not started, pending explicit
+confirmation to stop searching and commit to `qwen3.5:4b`. GLiClass/torch
+(v3) were installed only inside the running container for that test,
+never added to the Dockerfile/requirements — nothing to roll back.
 
 ## Open questions for next session
 
-- Resolve the model search: either run the pending round (Granite
-  4.2 8B/3B, Cogito 8B, Gemma 3 4B; confirm "NeoHorse-1-9B" actually
-  exists before spending a download on it) or deliberately stop here and
-  commit to `qwen3.5:4b`. This has gone through four rounds already —
-  worth deciding *when to stop searching*, not just what to search next.
-- Once a model is chosen, implement the wiring (Paso 3).
+- Confirm closing the model search on `qwen3.5:4b` (recommended above)
+  or provide a specific reason to keep looking — three full rounds (nine
+  alternative candidates) is enough that another round should have a
+  concrete hypothesis behind it, not just "try whatever's newest".
+- Once confirmed, implement the wiring (Paso 3).
 - A live idea from this round, independent of which model wins: instead
   of one router, a small Pareto-tiered cascade (e.g. a cheap/fast model
   handles the obvious cases, escalating only the uncertain ones to a
