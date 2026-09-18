@@ -266,6 +266,35 @@ than checking a tool got called, it points `memory.MEMORY_FILE` at a throwaway
 temp file and verifies a fact saved in one exchange is correctly surfaced
 back in a *separate* one — real persistence, not just tool selection.
 
+**`bench.py` + `evals/router_bench.py`/`router_dataset.py`** answer a
+narrower, prior question for the `ollama` backend: *which small model can
+reliably decide THINK vs. NO_THINK before the real reply*, since that
+routing call has to be cheap and fast, unlike the reasoning it gates. This
+came out of watching `qwen3:8b` never call `think_harder` on real
+Telegram messages, including ones explicitly asking it to "think
+carefully" — self-directed tool-calling for reasoning turned out to be a
+much weaker signal than the model just being asked to classify. The
+dataset is deliberately multilingual (the router must not key on the
+user's language) and adversarial in both directions: lexically trivial
+wording that hides a trap (`word-problem-trap`), and trivial questions
+dressed up with "think carefully" (`adversarial-trivial`). `bench.py`
+(repo root, reuses `setup.ensure_docker_running`/`pull_ollama_model` same
+as `update.py` reuses `setup`'s other pieces) pulls whatever models are
+missing, then runs `evals/router_bench.py` inside the `bot` container via
+`docker compose exec` — `router_bench.py` itself only needs `httpx` and a
+reachable Ollama, so it also runs standalone with `--base-url` pointed
+elsewhere. It measures THINK-recall and NO_THINK-recall separately
+(missing a real THINK case costs quality; false-triggering on an easy one
+costs latency — they're not symmetric) plus per-language and
+per-category accuracy and consistency across repeated attempts, and
+writes every raw call to `evals/results/*.json` (gitignored; bind-mounted
+in `docker-compose.yml` so a run inside the container is visible on the
+host). Same rule as the other two eval tools: never runs under `pytest`.
+`tests/test_router_bench.py` covers only the pure parts (label parsing,
+majority voting, metric computation, dataset shape) that would silently
+skew every benchmark run if wrong — the actual benchmarking is Ollama
+calls, so it can't be unit-tested.
+
 **Docker**: `docker-compose.yml` defines `bot` and `ollama` as separate
 services on the Compose network; the bot always reaches Ollama at
 `http://ollama:11434` regardless of backend choice (the `ollama` service

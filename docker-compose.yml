@@ -14,6 +14,10 @@ services:
       # remember/recall tool storage (app/tools/memory.py), so notes
       # survive restarts instead of living only in the in-memory history
       - memory_data:/data/memory
+      # evals/router_bench.py's raw JSON output, so `python bench.py` results
+      # land on the host instead of only inside the (otherwise ephemeral)
+      # container filesystem
+      - ./evals/results:/app/evals/results
 
   # Local model server. The bot reaches it at http://ollama:11434 (the
   # default OLLAMA_BASE_URL in .env.example), over the network Compose sets

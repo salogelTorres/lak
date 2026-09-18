@@ -258,6 +258,32 @@ backend that's usually inside the bot container:
 docker compose exec bot python -m evals.run
 ```
 
+## Comparing models as a THINK/NO_THINK router
+
+If you're on the `ollama` backend and considering `think_harder` (or
+extended reasoning in general), the question worth answering with data
+first is: *which model reliably decides whether a message needs it?* —
+that decision, not the reasoning itself, is what has to be cheap and fast,
+since it runs before every reply.
+
+`bench.py` pulls (if needed) and benchmarks one or more Ollama models as
+that router, against a labeled, multilingual dataset of tricky and
+adversarial cases (`evals/router_dataset.py`) — the agent must already be
+running (`docker compose up`):
+
+```bash
+python bench.py qwen3:0.6b qwen3:1.7b qwen3:4b
+```
+
+It prints accuracy, the two error rates that matter for a router (missed
+THINK cases cost quality, false THINK on easy ones costs latency),
+consistency across repeated attempts, and per-language/per-category
+breakdowns, and writes raw per-call results to `evals/results/*.json`
+(gitignored) for a closer look. Extra flags go to `evals/router_bench.py`
+after `--`, e.g. `python bench.py qwen3:4b -- --attempts 5 --limit 20`
+(see `python -m evals.router_bench --help` for the full list run inside
+the container). Like `evals/run.py`, this never runs under `pytest`.
+
 ## Useful commands
 
 ```bash
