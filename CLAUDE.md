@@ -223,7 +223,16 @@ required.
   model can tell a message was spoken vs. typed — the system prompt template
   explains the convention. The `WhisperModel` instance is cached per model
   name in the module-level `_whisper_models` dict (loading one is slow), not
-  reloaded per message.
+  reloaded per message. The final reply goes out through
+  `_send_formatted_reply()` with `parse_mode=ParseMode.MARKDOWN` — models
+  naturally write Markdown (`**bold**`, `[text](url)`, ...) and Telegram
+  shows that as literal unrendered symbols without a parse mode set. Legacy
+  Markdown, not `MarkdownV2`: it doesn't demand escaping every stray
+  `.`/`-`/`!` outside markdown constructs the way `MarkdownV2` does, which
+  model output never does either. If the reply isn't valid even under that
+  laxer parser (an unbalanced `*`/`_`/`` ` ``), Telegram raises
+  `BadRequest` and `_send_formatted_reply()` retries once with no parse
+  mode at all — a formatting quirk must never eat the reply outright.
 
 **`evals/`** (repo root, outside the `app` package) is a manual eval suite,
 separate from `tests/`: it calls the real configured backend and judges the

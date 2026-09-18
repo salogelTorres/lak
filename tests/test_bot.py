@@ -4,7 +4,8 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import CommandHandler, MessageHandler
 
 import app.bot as bot_module
@@ -20,6 +21,7 @@ from app.bot import (
     _is_allowed,
     _make_on_tool_call,
     _make_tool_context,
+    _send_formatted_reply,
     _split_recent,
     _transcribe_sync,
     _trim_to_token_budget,
@@ -236,7 +238,7 @@ async def test_handle_message_replies_with_llm_output(monkeypatch):
         "content": expected_system_content("You are Rex.", fixed, "UTC"),
     }
     assert sent_messages[-1] == {"role": "user", "content": "what's up?"}
-    update.message.reply_text.assert_awaited_once_with("the answer")
+    update.message.reply_text.assert_awaited_once_with("the answer", parse_mode=ParseMode.MARKDOWN)
 
 
 async def test_handle_message_keeps_history_across_calls():
@@ -333,7 +335,7 @@ async def test_handle_message_relays_tool_call_notifications_to_telegram():
     await handle_message(update, make_context())
 
     update.message.reply_text.assert_any_call(TOOL_CALL_LABELS["search_web"]({"query": "Billy the bot"}))
-    update.message.reply_text.assert_any_call("the answer")
+    update.message.reply_text.assert_any_call("the answer", parse_mode=ParseMode.MARKDOWN)
 
 
 def make_fake_application():
@@ -445,6 +447,27 @@ async def test_on_tool_call_recovers_from_a_formatter_that_raises():
     await on_tool_call("remind_me", {"minutes": "soon", "message": "hi"})
 
     update.message.reply_text.assert_awaited_once_with("🔧 Using remind_me...")
+
+
+async def test_send_formatted_reply_uses_markdown_parse_mode():
+    update = make_update()
+
+    await _send_formatted_reply(update, "**bold**")
+
+    update.message.reply_text.assert_awaited_once_with("**bold**", parse_mode=ParseMode.MARKDOWN)
+
+
+async def test_send_formatted_reply_falls_back_to_plain_text_on_bad_markdown(caplog):
+    update = make_update()
+    update.message.reply_text = AsyncMock(side_effect=[BadRequest("Can't parse entities"), None])
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await _send_formatted_reply(update, "unbalanced *bold")
+
+    assert update.message.reply_text.await_args_list[0].args == ("unbalanced *bold",)
+    assert update.message.reply_text.await_args_list[0].kwargs == {"parse_mode": ParseMode.MARKDOWN}
+    assert update.message.reply_text.await_args_list[1].args == ("unbalanced *bold",)
+    assert "wasn't valid markdown" in caplog.text.lower()
 
 
 async def test_handle_message_denies_disallowed_user():
@@ -784,7 +807,7 @@ async def test_handle_message_falls_back_to_trimming_when_compaction_fails(monke
 
     assert "compacting" in caplog.text.lower()
     # The bot still replied normally despite the compaction failure.
-    update.message.reply_text.assert_awaited_with("reply")
+    update.message.reply_text.assert_awaited_with("reply", parse_mode=ParseMode.MARKDOWN)
 
 
 async def test_handle_message_does_not_compact_when_recent_window_covers_everything():
@@ -820,7 +843,7 @@ async def test_handle_message_over_budget_with_nothing_old_enough_to_compact():
     await handle_message(update, make_context())
 
     assert all(call.args[0] != COMPACTING_NOTICE for call in update.message.reply_text.await_args_list)
-    update.message.reply_text.assert_awaited_with("ok")
+    update.message.reply_text.assert_awaited_with("ok", parse_mode=ParseMode.MARKDOWN)
 
 
 async def test_handle_message_trims_by_token_budget_not_message_count(monkeypatch):
@@ -923,7 +946,7 @@ async def test_handle_voice_transcribes_and_replies(monkeypatch):
         "role": "user",
         "content": f"{VOICE_TRANSCRIPTION_PREFIX}: hola que tal",
     }
-    update.message.reply_text.assert_awaited_once_with("got it")
+    update.message.reply_text.assert_awaited_once_with("got it", parse_mode=ParseMode.MARKDOWN)
 
 
 async def test_handle_voice_accepts_audio_files_too(monkeypatch):

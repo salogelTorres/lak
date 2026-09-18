@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from faster_whisper import WhisperModel
 from telegram import Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
 from app.config import Config
@@ -295,6 +296,22 @@ def _make_on_tool_call(update: Update):
     return on_tool_call
 
 
+async def _send_formatted_reply(update: Update, text: str) -> None:
+    """Send the model's reply with Telegram's Markdown rendering enabled —
+    models naturally write Markdown (**bold**, [text](url), etc.), and
+    Telegram shows that as literal, unrendered symbols without this.
+
+    Falls back to plain text if the reply isn't valid Markdown (an
+    unbalanced `*`/`_`/`` ` `` is enough to trip Telegram's parser): a
+    formatting quirk must never eat the reply outright.
+    """
+    try:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except BadRequest:
+        logger.warning("Reply wasn't valid Markdown; sending as plain text", exc_info=True)
+        await update.message.reply_text(text)
+
+
 def build_application(config: Config, llm_client: LLMClient) -> Application:
     # per-chat conversation history and running summary, kept in memory only
     # (reset on restart)
@@ -360,7 +377,7 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
 
         histories[chat_id] = history
         history.append({"role": "assistant", "content": reply})
-        await update.message.reply_text(reply)
+        await _send_formatted_reply(update, reply)
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _has_access(update):
