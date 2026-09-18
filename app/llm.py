@@ -80,10 +80,17 @@ async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall) -> Message:
     if tool is None:
         return {"role": "tool", "tool_call_id": call_id, "content": f"Unknown tool: {name}"}
 
-    try:
-        arguments: dict[str, Any] = json.loads(function.get("arguments") or "{}")
-    except json.JSONDecodeError:
-        arguments = {}
+    # Ollama's /api/chat hands back tool_calls[].function.arguments already
+    # parsed into a dict; OpenAI-compatible /chat/completions sends it as a
+    # JSON string. Handle both instead of assuming the OpenAI shape.
+    raw_arguments = function.get("arguments") or {}
+    if isinstance(raw_arguments, str):
+        try:
+            arguments: dict[str, Any] = json.loads(raw_arguments or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+    else:
+        arguments = raw_arguments
 
     try:
         result = await asyncio.to_thread(tool.execute, **arguments)

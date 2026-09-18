@@ -211,6 +211,25 @@ async def test_ollama_client_executes_tool_call_then_returns_final_reply(patch_a
     assert sent_messages[-1] == {"role": "tool", "tool_call_id": "call1", "content": "Greeted Luis"}
 
 
+async def test_ollama_client_executes_tool_call_with_dict_arguments(patch_async_client_sequence):
+    # Regression test: Ollama's /api/chat sends tool_calls[].function.arguments
+    # as a dict rather than a JSON string, which previously crashed _call_tool.
+    import app.llm as llm_module
+
+    tool_call = {"id": "call1", "type": "function", "function": {"name": "greet", "arguments": {"name": "Luis"}}}
+    responses = [
+        FakeResponse({"message": {"content": None, "tool_calls": [tool_call]}}),
+        FakeResponse({"message": {"content": "Hello, Luis!"}}),
+    ]
+    patch_async_client_sequence(llm_module.httpx, responses)
+    tool = make_greet_tool()
+    client = OllamaClient("http://ollama:11434", "llama3")
+
+    result = await client.chat([{"role": "user", "content": "greet Luis"}], tools=[tool])
+
+    assert result == "Hello, Luis!"
+
+
 async def test_cloud_client_executes_tool_call_then_returns_final_reply(patch_async_client_sequence):
     import app.llm as llm_module
 
@@ -265,6 +284,23 @@ async def test_call_tool_reports_unknown_tool_name():
     message = await _call_tool({}, make_tool_call("call1", "mystery", "{}"))
 
     assert message == {"role": "tool", "tool_call_id": "call1", "content": "Unknown tool: mystery"}
+
+
+async def test_call_tool_accepts_arguments_already_parsed_as_dict():
+    # Ollama's /api/chat hands back tool_calls[].function.arguments as a
+    # dict, not a JSON string like OpenAI-compatible APIs do.
+    received = {}
+
+    def record(**kwargs):
+        received.update(kwargs)
+        return "ok"
+
+    tool = Tool(name="t", description="d", parameters={}, execute=record)
+    call = {"id": "call1", "type": "function", "function": {"name": "t", "arguments": {"name": "Luis"}}}
+
+    await _call_tool({"t": tool}, call)
+
+    assert received == {"name": "Luis"}
 
 
 async def test_call_tool_defaults_arguments_on_invalid_json():
