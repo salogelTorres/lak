@@ -21,6 +21,8 @@ from evals.router_dataset import CASES, NO_THINK, THINK
         ("  THINK\n", THINK),
         ("Answer: THINK", THINK),
         ("<think>hmm</think>NO_THINK", NO_THINK),
+        ('{"label": "THINK"}', THINK),
+        ('{\n  "label": "NO_THINK"\n}', NO_THINK),
         ("I don't know", None),
         ("", None),
     ],

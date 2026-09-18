@@ -63,6 +63,18 @@ ROUTER_SYSTEM_PROMPT = (
 
 _THINK_TAGS_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# Ollama's structured-output support (a JSON schema passed as `format`)
+# constrains the *next token* at the grammar level, forcing the model to
+# emit the label directly instead of free-text it may or may not follow —
+# smaller models otherwise launch into an open-ended, unstoppable ramble
+# ("Okay, let's see...") even when told to reply with one word only, no
+# matter how many tokens they're given to eventually get there.
+_ROUTER_SCHEMA = {
+    "type": "object",
+    "properties": {"label": {"type": "string", "enum": [THINK, NO_THINK]}},
+    "required": ["label"],
+}
+
 
 def parse_label(raw: str) -> str | None:
     """Map a model's reply to THINK / NO_THINK, or None if it said neither.
@@ -206,10 +218,12 @@ async def _classify(
             {"role": "user", "content": text},
         ],
         "stream": False,
-        # A handful of tokens is all a one-word answer needs; anything past
-        # that is the model rambling, and with generation being the slow
-        # part on modest hardware, capping it is what keeps a router cheap.
-        "options": {"num_predict": 5},
+        "format": _ROUTER_SCHEMA,
+        # The schema still leaves room for `{"label": "...`, whitespace, and
+        # closing punctuation around the enum value — a handful more tokens
+        # than the bare word, but nowhere near what an unconstrained model
+        # needs to ramble its way to an answer (see _ROUTER_SCHEMA).
+        "options": {"num_predict": 20},
     }
     if disable_thinking:
         payload["think"] = False
