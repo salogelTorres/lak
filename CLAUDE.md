@@ -32,6 +32,7 @@ python update.py                # existing agent: fetch+merge template/main, fil
 docker compose up -d --build    # run without the wizard (needs .env already present)
 docker compose logs -f          # follow bot + ollama logs
 docker compose exec ollama ollama pull <model>   # pull/switch a local model
+docker compose exec bot python -m evals.run      # manual tool-use evals against a real LLM
 ```
 
 Coverage is enforced at 99% (line+branch) via `--cov-fail-under=99` in
@@ -168,6 +169,18 @@ required.
   explains the convention. The `WhisperModel` instance is cached per model
   name in the module-level `_whisper_models` dict (loading one is slow), not
   reloaded per message.
+
+**`evals/`** (repo root, outside the `app` package) is a manual eval suite,
+separate from `tests/`: it calls the real configured backend and judges the
+model's own tool-use choices (does it call `search_web` for a current-events
+question, reach for `fetch_page` when a snippet isn't enough, stay quiet on
+tools for chit-chat). It's slow and not fully deterministic, so it never
+runs as part of `pytest` and isn't subject to the coverage gate — run it by
+hand with `python -m evals.run` (usually via `docker compose exec bot`, so
+`OLLAMA_BASE_URL`'s default resolves over the Compose network). It spies on
+`app.llm._call_tool` by monkeypatching the module attribute for the duration
+of each case rather than instrumenting the real code path, so production
+behavior is untouched by the eval harness existing.
 
 **Docker**: `docker-compose.yml` defines `bot` and `ollama` as separate
 services on the Compose network; the bot always reaches Ollama at

@@ -231,6 +231,21 @@ pytest
 line+branch coverage drops below 99%. No Docker, Telegram, or LLM backend
 is required — all I/O (HTTP calls, `input()`, `subprocess`) is mocked.
 
+## Evaluating tool-use behavior
+
+`evals/run.py` is a separate, manual eval suite that checks a real model's
+own choices — e.g. does it call `search_web` for a current-events question,
+does it reach for `fetch_page` when a snippet isn't enough, does it avoid
+tools for basic chit-chat. Unlike `tests/`, this calls the actual configured
+backend: it's slow, not fully deterministic, and never runs as part of
+`pytest` or blocks on coverage. Requires `ENABLED_TOOLS` set in `.env` and
+the backend actually reachable from wherever you run it — for the `ollama`
+backend that's usually inside the bot container:
+
+```bash
+docker compose exec bot python -m evals.run
+```
+
 ## Useful commands
 
 ```bash
