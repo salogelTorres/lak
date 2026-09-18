@@ -53,6 +53,14 @@ LLM_BACKEND_ALIASES = {
     "remote": "cloud",
 }
 
+# Tools an agent can opt into via ENABLED_TOOLS, mirrored here (name ->
+# description) rather than imported from app.tools, so setup.py stays
+# stdlib-only and runnable before the app's dependencies are installed.
+# Keep in sync with app/tools/__init__.py's AVAILABLE_TOOLS catalog.
+AVAILABLE_TOOLS = {
+    "search_web": "DuckDuckGo web search, no API key needed",
+}
+
 PROMPTS = {
     "TELEGRAM_BOT_TOKEN": "Telegram bot token (from @BotFather)",
     "ALLOWED_USER_IDS": "Telegram IDs allowed to use the bot, comma-separated (empty = anyone)",
@@ -94,6 +102,20 @@ def ask_llm_backend(default: str) -> str:
         if backend:
             return backend
         print(f"Please type 'local' or 'cloud' (got {raw!r}).")
+
+
+def ask_enabled_tools(default: str) -> str:
+    """Which tools (if any) the agent may call mid-conversation. Requires a
+    model that supports tool calling; unknown/typo'd names are dropped
+    silently, same as resolve_tools() does for the running agent."""
+    print("\nAvailable tools (needs a model that supports tool calling):")
+    for name, description in AVAILABLE_TOOLS.items():
+        print(f"  {name} — {description}")
+    raw = input(
+        f"Enable which tools? (comma-separated names, empty = none) [{default}]: "
+    ).strip()
+    chosen = raw or default
+    return ",".join(name for name in (n.strip() for n in chosen.split(",")) if name in AVAILABLE_TOOLS)
 
 
 def ensure_system_prompt() -> None:
@@ -253,6 +275,8 @@ def main() -> None:
     values["LLM_BACKEND"] = ask_llm_backend(values.get("LLM_BACKEND", "ollama"))
     for key in BACKEND_KEYS[values["LLM_BACKEND"]]:
         values[key] = ask(key, values.get(key, ""))
+
+    values["ENABLED_TOOLS"] = ask_enabled_tools(values.get("ENABLED_TOOLS", ""))
 
     with ENV_FILE.open("w", encoding="utf-8") as f:
         for key, value in values.items():

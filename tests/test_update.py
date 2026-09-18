@@ -142,9 +142,13 @@ def test_main_full_success_flow_reports_new_keys_and_gpu(fake_repo, monkeypatch,
 
     assert update.main() == 0
 
-    run_mock.assert_called_once_with(
-        ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
-    )
+    assert run_mock.call_args_list == [
+        ((["docker", "info"],), {"capture_output": True, "check": False}),
+        (
+            (["docker", "compose", "up", "-d", "--build"],),
+            {"cwd": setup.ROOT, "check": False},
+        ),
+    ]
     out = capsys.readouterr().out
     assert "TZ, WHISPER_MODEL" in out
     assert "NVIDIA GPU detected" in out

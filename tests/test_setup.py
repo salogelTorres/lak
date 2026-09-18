@@ -124,6 +124,26 @@ def test_ask_llm_backend_reprompts_on_invalid_value(monkeypatch, capsys):
     assert "Please type 'local' or 'cloud'" in capsys.readouterr().out
 
 
+def test_ask_enabled_tools_uses_input_value(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "search_web")
+    assert setup.ask_enabled_tools("") == "search_web"
+
+
+def test_ask_enabled_tools_falls_back_to_default_on_empty_input(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert setup.ask_enabled_tools("search_web") == "search_web"
+
+
+def test_ask_enabled_tools_drops_unknown_names(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "search_web, bogus_tool")
+    assert setup.ask_enabled_tools("") == "search_web"
+
+
+def test_ask_enabled_tools_empty_input_and_default_disables_all(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert setup.ask_enabled_tools("") == ""
+
+
 def test_ensure_system_prompt_copies_from_example(env_paths):
     setup.ensure_system_prompt()
     assert setup.SYSTEM_PROMPT_FILE.read_text(encoding="utf-8") == "You are {{AGENT_NAME}}."
@@ -239,6 +259,120 @@ def test_ensure_gpu_override_noop_without_example(env_paths, monkeypatch):
     assert setup.ensure_gpu_override() is False
 
 
+def test_docker_is_running_true_on_returncode_zero(monkeypatch):
+    monkeypatch.setattr(setup.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
+    assert setup.docker_is_running() is True
+
+
+def test_docker_is_running_false_on_nonzero_returncode(monkeypatch):
+    monkeypatch.setattr(setup.subprocess, "run", MagicMock(return_value=MagicMock(returncode=1)))
+    assert setup.docker_is_running() is False
+
+
+def test_start_docker_daemon_windows_launches_existing_candidate(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(setup.Path, "exists", lambda self: True)
+    popen_mock = MagicMock()
+    monkeypatch.setattr(setup.subprocess, "Popen", popen_mock)
+
+    assert setup._start_docker_daemon() is True
+    popen_mock.assert_called_once()
+
+
+def test_start_docker_daemon_windows_no_candidate_found(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(setup.Path, "exists", lambda self: False)
+
+    assert setup._start_docker_daemon() is False
+
+
+def test_start_docker_daemon_darwin_uses_open(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/open" if name == "open" else None)
+    run_mock = MagicMock()
+    monkeypatch.setattr(setup.subprocess, "run", run_mock)
+
+    assert setup._start_docker_daemon() is True
+    run_mock.assert_called_once_with(["open", "-a", "Docker"], check=False)
+
+
+def test_start_docker_daemon_darwin_without_open(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+
+    assert setup._start_docker_daemon() is False
+
+
+def test_start_docker_daemon_linux_uses_systemctl(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(setup.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
+
+    assert setup._start_docker_daemon() is True
+
+
+def test_start_docker_daemon_linux_systemctl_fails_falls_back_to_service(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        setup.shutil, "which", lambda name: f"/usr/bin/{name}" if name in ("systemctl", "service") else None
+    )
+
+    def fake_run(args, **kwargs):
+        return MagicMock(returncode=1 if args[:2] == ["systemctl", "start"] else 0)
+
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+
+    assert setup._start_docker_daemon() is True
+
+
+def test_start_docker_daemon_linux_without_systemctl_or_service(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+
+    assert setup._start_docker_daemon() is False
+
+
+def test_start_docker_daemon_unknown_platform(monkeypatch):
+    monkeypatch.setattr(setup.platform, "system", lambda: "Plan9")
+    assert setup._start_docker_daemon() is False
+
+
+def test_ensure_docker_running_already_running(monkeypatch):
+    monkeypatch.setattr(setup, "docker_is_running", lambda: True)
+    assert setup.ensure_docker_running() is True
+
+
+def test_ensure_docker_running_cannot_start(monkeypatch, capsys):
+    monkeypatch.setattr(setup, "docker_is_running", lambda: False)
+    monkeypatch.setattr(setup, "_start_docker_daemon", lambda: False)
+
+    assert setup.ensure_docker_running() is False
+    assert "Could not start Docker automatically" in capsys.readouterr().out
+
+
+def test_ensure_docker_running_starts_and_becomes_ready(monkeypatch):
+    monkeypatch.setattr(setup, "_start_docker_daemon", lambda: True)
+    monkeypatch.setattr(setup.time, "sleep", MagicMock())
+    calls = {"n": 0}
+
+    def fake_is_running():
+        calls["n"] += 1
+        return calls["n"] >= 2  # not running yet on the initial check, ready on the first poll
+
+    monkeypatch.setattr(setup, "docker_is_running", fake_is_running)
+
+    assert setup.ensure_docker_running(timeout_seconds=10, poll_seconds=1) is True
+
+
+def test_ensure_docker_running_times_out(monkeypatch, capsys):
+    monkeypatch.setattr(setup, "_start_docker_daemon", lambda: True)
+    monkeypatch.setattr(setup, "docker_is_running", lambda: False)
+    monkeypatch.setattr(setup.time, "sleep", MagicMock())
+
+    assert setup.ensure_docker_running(timeout_seconds=3, poll_seconds=1) is False
+    assert "did not become ready" in capsys.readouterr().out
+
+
 def test_main_declines_overwrite(env_paths, monkeypatch, capsys):
     _, env_file, _, _ = env_paths
     env_file.write_text("EXISTING=1\n", encoding="utf-8")
@@ -263,6 +397,7 @@ def test_main_ollama_backend_without_docker(env_paths, monkeypatch, capsys):
             "Europe/Madrid",  # TZ
             "",  # LLM_BACKEND (default: ollama)
             "qwen3:8b",  # OLLAMA_MODEL
+            "",  # ENABLED_TOOLS (default: none)
             "",  # personality (skip)
         ],
     )
@@ -285,7 +420,10 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
     _, env_file, prompt_file, gpu_override_file = env_paths
     # even with a GPU present, the cloud backend never checks for one
     monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
-    run_mock = MagicMock()
+    # returncode=0 so docker_is_running() reports Docker as already up,
+    # short-circuiting ensure_docker_running() before it would otherwise
+    # try to actually launch Docker Desktop on the host.
+    run_mock = MagicMock(return_value=MagicMock(returncode=0))
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     pull_mock = MagicMock()
     monkeypatch.setattr(setup, "pull_ollama_model", pull_mock)
@@ -299,6 +437,7 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
             "cloud",
             "sk-key",
             "gpt-4o",
+            "search_web",  # ENABLED_TOOLS
             "Be extra playful.",
             "",  # launch docker (default: yes)
         ],
@@ -311,11 +450,13 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
     assert values["LLM_BACKEND"] == "cloud"
     assert values["CLOUD_API_KEY"] == "sk-key"
     assert values["CLOUD_MODEL"] == "gpt-4o"
+    assert values["ENABLED_TOOLS"] == "search_web"
     assert values["OLLAMA_MODEL"] == "llama3"  # untouched default
     assert prompt_file.read_text(encoding="utf-8") == "You are {{AGENT_NAME}}.\nBe extra playful.\n"
 
-    run_mock.assert_called_once_with(
-        ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
+    assert run_mock.call_args_list[-1] == (
+        (["docker", "compose", "up", "-d", "--build"],),
+        {"cwd": setup.ROOT, "check": False},
     )
     pull_mock.assert_not_called()
     assert not gpu_override_file.exists()
@@ -324,19 +465,23 @@ def test_main_cloud_backend_with_personality_and_docker_launch(env_paths, monkey
 
 def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypatch, capsys):
     _, env_file, _, gpu_override_file = env_paths
-    run_mock = MagicMock()
+    # returncode=0 so docker_is_running() reports Docker as already up,
+    # short-circuiting ensure_docker_running() before it would otherwise
+    # try to actually launch Docker Desktop on the host.
+    run_mock = MagicMock(return_value=MagicMock(returncode=0))
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
     pull_mock = MagicMock(return_value=True)
     monkeypatch.setattr(setup, "pull_ollama_model", pull_mock)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", "", ""])
 
     setup.main()
 
     values = env_dict(env_file)
     assert values["LLM_BACKEND"] == "ollama"
     assert values["OLLAMA_MODEL"] == "qwen3:8b"
-    run_mock.assert_called_once_with(
-        ["docker", "compose", "up", "-d", "--build"], cwd=setup.ROOT, check=False
+    assert run_mock.call_args_list[-1] == (
+        (["docker", "compose", "up", "-d", "--build"],),
+        {"cwd": setup.ROOT, "check": False},
     )
     pull_mock.assert_called_once_with("qwen3:8b")
     # no GPU in this fixture (which_only_docker), so no override file
@@ -347,9 +492,12 @@ def test_main_ollama_backend_with_docker_launch_pulls_model(env_paths, monkeypat
 def test_main_ollama_backend_with_gpu_enables_override(env_paths, monkeypatch, capsys):
     _, env_file, _, gpu_override_file = env_paths
     monkeypatch.setattr(setup, "detect_nvidia_gpu", lambda: True)
-    monkeypatch.setattr(setup.subprocess, "run", MagicMock())
+    # returncode=0 so docker_is_running() reports Docker as already up,
+    # short-circuiting ensure_docker_running() before it would otherwise
+    # try to actually launch Docker Desktop on the host.
+    monkeypatch.setattr(setup.subprocess, "run", MagicMock(return_value=MagicMock(returncode=0)))
     monkeypatch.setattr(setup, "pull_ollama_model", MagicMock(return_value=True))
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "qwen3:8b", "", "", ""])
 
     setup.main()
 
@@ -361,7 +509,7 @@ def test_main_declines_docker_launch(env_paths, monkeypatch, capsys):
     _, env_file, _, gpu_override_file = env_paths
     run_mock = MagicMock()
     monkeypatch.setattr(setup.subprocess, "run", run_mock)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "", "llama3", "", "n"])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "", "llama3", "", "", "n"])
 
     setup.main()
 
@@ -373,7 +521,7 @@ def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monk
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
     scripted_input(
         monkeypatch,
-        ["my-token", "", "Rex", "", "nope", "local", "llama3", ""],
+        ["my-token", "", "Rex", "", "nope", "local", "llama3", "", ""],
     )
 
     setup.main()  # must not raise
@@ -382,7 +530,7 @@ def test_main_reprompts_on_invalid_llm_backend_before_continuing(env_paths, monk
 def test_main_accepts_local_as_ollama_alias(env_paths, monkeypatch):
     _, env_file, _, _ = env_paths
     monkeypatch.setattr(setup.shutil, "which", lambda name: None)
-    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "llama3", ""])
+    scripted_input(monkeypatch, ["my-token", "", "Rex", "", "local", "llama3", "", ""])
 
     setup.main()
 
