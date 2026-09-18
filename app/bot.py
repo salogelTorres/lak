@@ -54,6 +54,7 @@ TOOL_CALL_LABELS = {
     "recall": "🧠 Checking my memory...",
     "get_weather": "🌤️ Checking the weather...",
     "remind_me": "⏰ Setting a reminder...",
+    "think_harder": "🤔 Thinking it through...",
 }
 
 _whisper_models: dict[str, WhisperModel] = {}

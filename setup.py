@@ -64,6 +64,7 @@ AVAILABLE_TOOLS = {
     "recall": "Retrieve everything remembered for a chat (pairs with remember)",
     "get_weather": "Current weather for a place, via Open-Meteo, no API key needed",
     "remind_me": "Schedule a reminder message to be sent back to a chat later",
+    "think_harder": "Re-answer the current question with extended reasoning (Ollama + e.g. qwen3 only)",
 }
 
 PROMPTS = {

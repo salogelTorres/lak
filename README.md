@@ -13,9 +13,11 @@ OpenRouter, proxies, etc.), running in Docker.
   (`ALLOWED_USER_IDS`).
 - **Tools**: `app/tools/` catalogs capabilities an agent can call mid-conversation
   — `search_web` and `fetch_page` for web research, `remember`/`recall` for
-  persistent per-chat notes, `get_weather` (Open-Meteo, no API key), and
-  `remind_me` for delayed reminders. None are enabled by default — `setup.py`
-  asks which ones to turn on, stored as `ENABLED_TOOLS` in `.env`.
+  persistent per-chat notes, `get_weather` (Open-Meteo, no API key),
+  `remind_me` for delayed reminders, and `think_harder` to re-answer a hard
+  question with extended reasoning turned on (Ollama + a supporting model,
+  e.g. qwen3). None are enabled by default — `setup.py` asks which ones to
+  turn on, stored as `ENABLED_TOOLS` in `.env`.
 - **Voice messages**: Telegram voice notes (and audio files) are transcribed
   locally with `faster-whisper` (CPU, no API key, independent of
   `LLM_BACKEND`) and fed to the model tagged as
@@ -144,9 +146,12 @@ OpenRouter, proxies, etc.), running in Docker.
   key), `fetch_page` (reads a specific page's full text — use it alongside
   `search_web` when a snippet isn't enough), `remember`/`recall` (persistent
   per-chat notes that survive restarts), `get_weather` (Open-Meteo, no API
-  key), and `remind_me` (schedules a message back to the chat after a
+  key), `remind_me` (schedules a message back to the chat after a
   delay — lost if the bot restarts before it fires, same as conversation
-  history).
+  history), and `think_harder` (re-answers the current question with
+  extended reasoning turned on — only has a real effect with
+  `LLM_BACKEND=ollama` and a model that supports it, like qwen3; on other
+  backends/models it just re-asks plainly).
 - **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
   `medium`/`large-v3`) trades off speed for accuracy — `small` is a
   reasonable default on CPU. Every transcription is prefixed with

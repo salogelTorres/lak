@@ -1,7 +1,7 @@
 import pytest
 
 from app.config import Config
-from app.llm import CloudClient, OllamaClient, _call_tool, build_llm_client
+from app.llm import CloudClient, OllamaClient, _call_tool, _with_think_harder, build_llm_client
 from app.tools.base import Tool, ToolContext
 
 
@@ -369,6 +369,60 @@ async def test_ollama_client_notifies_on_tool_call_before_running_it(patch_async
 
     assert result == "Hello, Luis!"
     assert notified == ["greet"]
+
+
+def test_with_think_harder_returns_none_when_context_is_none():
+    async def fake_complete(msgs, tools, think=False):
+        return {"content": "x"}
+
+    assert _with_think_harder(None, fake_complete, []) is None
+
+
+def test_with_think_harder_binds_snapshot_and_think_flag():
+    # Sync on purpose, not async: think_harder() runs asyncio.run()
+    # internally, same as it does for real inside asyncio.to_thread — that
+    # would raise if called from a thread that already has a running loop
+    # (as an `async def` test's does), same constraint production has.
+    seen = {}
+
+    async def fake_complete(msgs, tools, think=False):
+        seen["msgs"] = msgs
+        seen["tools"] = tools
+        seen["think"] = think
+        return {"content": "deep answer"}
+
+    context = ToolContext(chat_id=1, schedule_reminder=lambda *a: None)
+    snapshot = [{"role": "user", "content": "hi"}]
+
+    enriched = _with_think_harder(context, fake_complete, snapshot)
+
+    assert enriched.think_harder() == "deep answer"
+    assert seen == {"msgs": snapshot, "tools": None, "think": True}
+
+
+async def test_ollama_client_think_harder_tool_sends_think_flag_and_relays_answer(patch_async_client_sequence):
+    import app.llm as llm_module
+    from app.tools.think_harder import TOOL as THINK_HARDER_TOOL
+
+    responses = [
+        FakeResponse({"message": {"content": None, "tool_calls": [make_tool_call("call1", "think_harder", "{}")]}}),
+        FakeResponse({"message": {"content": "Deep answer"}}),  # the internal think=True re-ask
+        FakeResponse({"message": {"content": "Deep answer"}}),  # outer model relays it
+    ]
+    calls = patch_async_client_sequence(llm_module.httpx, responses)
+    client = OllamaClient("http://ollama:11434", "qwen3:8b")
+    context = ToolContext(chat_id=1, schedule_reminder=lambda *a: None)
+
+    result = await client.chat(
+        [{"role": "user", "content": "What's 17*24?"}], tools=[THINK_HARDER_TOOL], context=context
+    )
+
+    assert result == "Deep answer"
+    assert len(calls) == 3
+    _, first_kwargs = calls[0]
+    assert "think" not in first_kwargs["json"]
+    _, second_kwargs = calls[1]
+    assert second_kwargs["json"]["think"] is True
 
 
 async def test_call_tool_catches_execution_errors_instead_of_raising():

@@ -100,6 +100,22 @@ def scheduled_a_reminder() -> Callable[[str, list[str], list[tuple[float, str]]]
     return judge
 
 
+def used_think_harder_successfully() -> Callable[[str, list[str], list], tuple[bool, str]]:
+    """Stronger than used_tool: checks the extended-reasoning round-trip
+    actually produced an answer, rather than the tool call falling back
+    (e.g. because think_harder wasn't wired with a context.think_harder —
+    a plumbing bug, not the model's choice)."""
+
+    def judge(reply: str, tools_called: list[str], _reminders: list) -> tuple[bool, str]:
+        if "think_harder" not in tools_called:
+            return False, f"expected a call to 'think_harder', got {tools_called or 'no tool calls'}"
+        if "isn't available" in reply or "didn't produce a usable answer" in reply:
+            return False, f"think_harder ran but fell back instead of producing a real answer: {reply!r}"
+        return True, "called think_harder and relayed its extended-reasoning answer"
+
+    return judge
+
+
 CASES = [
     EvalCase(
         name="uses search_web for a current-events question",
@@ -130,6 +146,18 @@ CASES = [
         system_prompt="You are a helpful assistant.",
         user_message="Remind me to call my dentist in 20 minutes.",
         judge=scheduled_a_reminder(),
+    ),
+    EvalCase(
+        name="uses think_harder for a tricky reasoning question",
+        system_prompt=(
+            "You are a helpful assistant. Use think_harder for questions that need "
+            "careful multi-step reasoning instead of guessing."
+        ),
+        user_message=(
+            "A farmer has 17 sheep. All but 9 run away. Then he buys triple the number "
+            "of sheep he has left. How many sheep does he have now? Think carefully."
+        ),
+        judge=used_think_harder_successfully(),
     ),
     EvalCase(
         name="does not reach for tools on basic chit-chat",

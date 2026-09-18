@@ -7,6 +7,8 @@ from app.tools.fetch_page import fetch_page
 from app.tools.memory import RECALL_TOOL, REMEMBER_TOOL
 from app.tools.reminders import TOOL as REMIND_ME_TOOL
 from app.tools.reminders import remind_me
+from app.tools.think_harder import TOOL as THINK_HARDER_TOOL
+from app.tools.think_harder import think_harder
 from app.tools.weather import TOOL as WEATHER_TOOL
 from app.tools.weather import get_weather
 from app.tools.web_search import TOOL, search_web
@@ -34,6 +36,7 @@ def test_available_tools_includes_memory_weather_and_reminders():
     assert AVAILABLE_TOOLS["recall"] is RECALL_TOOL
     assert AVAILABLE_TOOLS["get_weather"] is WEATHER_TOOL
     assert AVAILABLE_TOOLS["remind_me"] is REMIND_ME_TOOL
+    assert AVAILABLE_TOOLS["think_harder"] is THINK_HARDER_TOOL
 
 
 def test_resolve_tools_looks_up_known_names_and_skips_unknown():
@@ -489,3 +492,28 @@ def test_remind_me_rejects_too_far_out():
     result = remind_me(MAX_MINUTES + 1, "hi", context=make_tool_context())
 
     assert "too far out" in result.lower()
+
+
+def test_think_harder_relays_the_deep_answer_with_an_instruction_prefix():
+    context = ToolContext(chat_id=1, schedule_reminder=lambda *a: None, think_harder=lambda: "42")
+
+    result = think_harder(context=context)
+
+    assert "42" in result
+    assert "relay it to the user as-is" in result.lower()
+
+
+def test_think_harder_reports_when_unavailable():
+    context = ToolContext(chat_id=1, schedule_reminder=lambda *a: None, think_harder=None)
+
+    result = think_harder(context=context)
+
+    assert "isn't available" in result.lower()
+
+
+def test_think_harder_reports_when_deep_answer_is_empty():
+    context = ToolContext(chat_id=1, schedule_reminder=lambda *a: None, think_harder=lambda: "   ")
+
+    result = think_harder(context=context)
+
+    assert "didn't produce a usable answer" in result.lower()

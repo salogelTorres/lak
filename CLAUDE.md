@@ -135,10 +135,11 @@ required.
   different: they need to know *which chat* they're running in, which the
   model must never supply itself (it could get it wrong, or a user could
   try to make it target another chat). `tools/base.py`'s `ToolContext`
-  (`chat_id` + a `schedule_reminder` callback) is injected by
-  `app.llm._call_tool()` for any `Tool` with `needs_context=True`, threaded
-  in from `bot.py`'s `_make_tool_context()` — never sourced from the model's
-  own arguments. `remember`/`recall` persist to a single JSON file
+  (`chat_id`, a `schedule_reminder` callback, and a `think_harder` callback
+  — see below) is injected by `app.llm._call_tool()` for any `Tool` with
+  `needs_context=True`, threaded in from `bot.py`'s `_make_tool_context()`
+  — never sourced from the model's own arguments. `remember`/`recall`
+  persist to a single JSON file
   (`MEMORY_FILE`, default `/data/memory/memory.json`, keyed by `chat_id`,
   guarded by a `threading.Lock` since tool execution runs in a thread pool)
   backed by the `memory_data` volume in `docker-compose.yml`, so notes
@@ -150,6 +151,23 @@ required.
   real job queue; like conversation history, a pending reminder is lost if
   the bot restarts before it fires — acceptable for this template, but
   worth knowing.
+
+  `think_harder.py` is a different kind of context-dependent tool: instead
+  of `chat_id`, it needs `context.think_harder` — a callback owned by
+  `app.llm._with_think_harder()`, rebuilt every round of the tool-calling
+  loop in `_run_with_tools()` from a *snapshot of that round's conversation*
+  taken before the tool-call turn is appended, plus the backend's own
+  `complete()` closure. Calling it re-sends that exact conversation with
+  `think=True` (Ollama's extended-reasoning flag; ignored by `CloudClient`,
+  where it degrades to a plain re-ask) and returns just the final
+  `content`, discarding the reasoning trace — bot.py never sees or relays
+  it. The tool wraps that answer with an instruction telling the outer,
+  non-thinking model to relay it verbatim rather than rephrase it, same
+  trust model already at play for every other tool's results. Because
+  `Tool.execute` is sync but `complete()` is async, the callback bridges
+  with a fresh `asyncio.run()` inside the worker thread `_call_tool()`
+  already runs tools in via `asyncio.to_thread` — safe since that thread
+  has no event loop of its own to conflict with.
 
   Every tool call is also announced to the chat right before it runs
   (`bot.py`'s `_make_on_tool_call()`, threaded into `_run_with_tools()` as
@@ -205,7 +223,9 @@ model's own tool-use choices — does it call `search_web` for a
 current-events question, reach for `fetch_page` when a snippet isn't
 enough, call `get_weather` *and* actually report a temperature from it,
 schedule a sane (positive-delay, non-empty-message) reminder via
-`remind_me`, stay quiet on tools for chit-chat. It's slow and not fully
+`remind_me`, actually get a real answer back from `think_harder` (not one
+of its fallback strings) on a tricky reasoning question, stay quiet on
+tools for chit-chat. It's slow and not fully
 deterministic, so it never runs as part of `pytest` and isn't subject to
 the coverage gate — run it by hand with `python -m evals.run` (usually via
 `docker compose exec bot`, so `OLLAMA_BASE_URL`'s default resolves over the

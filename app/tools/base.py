@@ -20,6 +20,13 @@ class ToolContext:
     # back to this chat after a delay. Owned by bot.py since that's where
     # the Telegram bot instance and the event loop live.
     schedule_reminder: Callable[[float, str], None]
+    # think_harder(): re-runs the exact conversation that led to this tool
+    # call, with the model's extended-reasoning mode turned on, and returns
+    # its final answer. None when there's no conversation state to redo
+    # (context built outside a tool-calling round). Owned by app.llm, since
+    # only it has both the current conversation snapshot and the
+    # backend-specific completion function — see app.llm._with_think_harder.
+    think_harder: Callable[[], str] | None = None
 
 
 @dataclass(frozen=True)

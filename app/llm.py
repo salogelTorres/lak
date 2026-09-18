@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -44,8 +45,10 @@ class LLMClient(Protocol):
 
 # Sends one request and returns the raw assistant message dict. Implemented
 # per backend (OllamaClient/CloudClient each shape their own payload), then
-# driven by the shared _run_with_tools loop below.
-Complete = Callable[[list[Message], list[Tool] | None], Awaitable[Message]]
+# driven by the shared _run_with_tools loop below. `think` only has an
+# effect on backends/models that support extended reasoning (Ollama +
+# e.g. qwen3) — CloudClient's closure just ignores it.
+Complete = Callable[[list[Message], list[Tool] | None, bool], Awaitable[Message]]
 
 
 async def _post_json(
@@ -79,18 +82,42 @@ async def _run_with_tools(
     conversation = list(messages)
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         offer_tools = round_index < MAX_TOOL_ROUNDS
-        message = await complete(conversation, tools if offer_tools else None)
+        message = await complete(conversation, tools if offer_tools else None, False)
         calls: list[ToolCall] = message.get("tool_calls") or []
         if not calls:
             return message.get("content") or ""
 
+        # Snapshot *before* this round's tool-call turn is appended, so a
+        # tool that asks to "think harder" redoes the exact question that
+        # led to it, not one already polluted by its own tool-call/result.
+        round_context = _with_think_harder(context, complete, list(conversation))
         conversation.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
         for call in calls:
             if on_tool_call:
                 await on_tool_call(call.get("function", {}).get("name", ""))
-            conversation.append(await _call_tool(tools_by_name, call, context))
+            conversation.append(await _call_tool(tools_by_name, call, round_context))
 
     return "I tried using some tools but couldn't get to an answer. Could you rephrase?"
+
+
+def _with_think_harder(
+    context: ToolContext | None, complete: Complete, conversation_snapshot: list[Message]
+) -> ToolContext | None:
+    """Enrich `context` with a `think_harder` callback bound to this round's
+    conversation, so app.tools.think_harder can redo it with extended
+    reasoning on. Rebuilt every round since the conversation keeps growing.
+    """
+    if context is None:
+        return None
+
+    def think_harder() -> str:
+        async def _ask() -> str:
+            message = await complete(conversation_snapshot, None, True)
+            return message.get("content") or ""
+
+        return asyncio.run(_ask())
+
+    return dataclasses.replace(context, think_harder=think_harder)
 
 
 async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall, context: ToolContext | None = None) -> Message:
@@ -144,10 +171,12 @@ class OllamaClient:
         context: ToolContext | None = None,
         on_tool_call: OnToolCall | None = None,
     ) -> str:
-        async def complete(msgs: list[Message], offered_tools: list[Tool] | None) -> Message:
+        async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
             payload: dict[str, Any] = {"model": self.model, "messages": msgs, "stream": False}
             if offered_tools:
                 payload["tools"] = [tool.schema() for tool in offered_tools]
+            if think:
+                payload["think"] = True
             data = await _post_json(f"{self.base_url}/api/chat", payload, headers=None, timeout=self.TIMEOUT)
             return data["message"]
 
@@ -169,7 +198,9 @@ class CloudClient:
         context: ToolContext | None = None,
         on_tool_call: OnToolCall | None = None,
     ) -> str:
-        async def complete(msgs: list[Message], offered_tools: list[Tool] | None) -> Message:
+        async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
+            # No standard OpenAI-compatible equivalent to Ollama's `think` —
+            # think_harder still "works" here, it just re-asks plainly.
             payload: dict[str, Any] = {"model": self.model, "messages": msgs}
             if offered_tools:
                 payload["tools"] = [tool.schema() for tool in offered_tools]
