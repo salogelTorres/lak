@@ -15,6 +15,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandl
 from app.config import Config
 from app.llm import LLMClient
 from app.tools import resolve_tools
+from app.tools.base import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,19 @@ COMPACTION_SYSTEM_PROMPT = (
 )
 
 WHISPER_DOWNLOAD_ROOT = "/data/whisper"
+
+# Sent to the chat right before a tool actually runs, so a call that takes a
+# few seconds (a web request, a file write) doesn't look like the bot has
+# stalled. Falls back to the raw tool name for any tool without an entry
+# here, so a new tool works without needing to touch this dict first.
+TOOL_CALL_LABELS = {
+    "search_web": "🔍 Searching the web...",
+    "fetch_page": "📖 Reading a page...",
+    "remember": "💾 Saving that to memory...",
+    "recall": "🧠 Checking my memory...",
+    "get_weather": "🌤️ Checking the weather...",
+    "remind_me": "⏰ Setting a reminder...",
+}
 
 _whisper_models: dict[str, WhisperModel] = {}
 
@@ -207,6 +221,40 @@ async def _keep_typing(bot, chat_id: int) -> None:
         await asyncio.sleep(TYPING_REFRESH_SECONDS)
 
 
+def _make_tool_context(application: Application, chat_id: int) -> ToolContext:
+    """Build the per-chat context threaded into tools that declare
+    `needs_context` (persistent memory, reminders) — see
+    app.tools.base.ToolContext. Kept out of _reply_to itself since it needs
+    nothing from that closure besides `application` and `chat_id`.
+    """
+    reminder_tasks: set[asyncio.Task] = application.bot_data.setdefault("reminder_tasks", set())
+
+    def schedule_reminder(delay_seconds: float, message: str) -> None:
+        async def _fire() -> None:
+            await asyncio.sleep(delay_seconds)
+            try:
+                await application.bot.send_message(chat_id, f"⏰ Reminder: {message}")
+            except Exception:
+                logger.exception("Failed sending reminder")
+            finally:
+                reminder_tasks.discard(task)
+
+        # Same gotcha as _warm_up_ollama's task below: asyncio only holds a
+        # *weak* reference to a bare create_task() result, so without
+        # storing it somewhere it can be garbage-collected mid-sleep.
+        task = asyncio.create_task(_fire())
+        reminder_tasks.add(task)
+
+    return ToolContext(chat_id=chat_id, schedule_reminder=schedule_reminder)
+
+
+def _make_on_tool_call(update: Update):
+    async def on_tool_call(name: str) -> None:
+        await update.message.reply_text(TOOL_CALL_LABELS.get(name, f"🔧 Using {name}..."))
+
+    return on_tool_call
+
+
 def build_application(config: Config, llm_client: LLMClient) -> Application:
     # per-chat conversation history and running summary, kept in memory only
     # (reset on restart)
@@ -254,7 +302,13 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
 
             tools = resolve_tools(config.enabled_tools)
             try:
-                reply = await llm_client.chat(history, tools=tools) if tools else await llm_client.chat(history)
+                if tools:
+                    tool_context = _make_tool_context(context.application, chat_id)
+                    reply = await llm_client.chat(
+                        history, tools=tools, context=tool_context, on_tool_call=_make_on_tool_call(update)
+                    )
+                else:
+                    reply = await llm_client.chat(history)
             except Exception:
                 logger.exception("Failed calling the LLM")
                 await update.message.reply_text("Something went wrong talking to the model. Please try again.")

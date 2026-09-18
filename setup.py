@@ -60,6 +60,10 @@ LLM_BACKEND_ALIASES = {
 AVAILABLE_TOOLS = {
     "search_web": "DuckDuckGo web search, no API key needed",
     "fetch_page": "Fetch a specific web page and read its full text (deeper research alongside search_web)",
+    "remember": "Save a note to persistent memory for a chat (survives restarts)",
+    "recall": "Retrieve everything remembered for a chat (pairs with remember)",
+    "get_weather": "Current weather for a place, via Open-Meteo, no API key needed",
+    "remind_me": "Schedule a reminder message to be sent back to a chat later",
 }
 
 PROMPTS = {

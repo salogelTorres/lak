@@ -12,10 +12,10 @@ OpenRouter, proxies, etc.), running in Docker.
   per-chat conversation history and an optional user whitelist
   (`ALLOWED_USER_IDS`).
 - **Tools**: `app/tools/` catalogs capabilities an agent can call mid-conversation
-  (currently `search_web`, DuckDuckGo, no API key; and `fetch_page`, reading a
-  specific page's full text for deeper research). None are enabled by
-  default — `setup.py` asks which ones to turn on, stored as `ENABLED_TOOLS`
-  in `.env`.
+  — `search_web` and `fetch_page` for web research, `remember`/`recall` for
+  persistent per-chat notes, `get_weather` (Open-Meteo, no API key), and
+  `remind_me` for delayed reminders. None are enabled by default — `setup.py`
+  asks which ones to turn on, stored as `ENABLED_TOOLS` in `.env`.
 - **Voice messages**: Telegram voice notes (and audio files) are transcribed
   locally with `faster-whisper` (CPU, no API key, independent of
   `LLM_BACKEND`) and fed to the model tagged as
@@ -138,9 +138,15 @@ OpenRouter, proxies, etc.), running in Docker.
   tool the template adds, without touching ones you've already enabled.
   Requires a model that supports tool/function calling (qwen3:8b and most
   cloud models do); if the model just ignores a tool, check that first.
-  Currently available: `search_web` (DuckDuckGo, no API key) and
-  `fetch_page` (reads a specific page's full text — use it alongside
-  `search_web` when a snippet isn't enough).
+  Whenever a tool actually runs, the chat gets a short heads-up first (e.g.
+  "🔍 Searching the web...") so a multi-second call doesn't look like the
+  bot has stalled. Currently available: `search_web` (DuckDuckGo, no API
+  key), `fetch_page` (reads a specific page's full text — use it alongside
+  `search_web` when a snippet isn't enough), `remember`/`recall` (persistent
+  per-chat notes that survive restarts), `get_weather` (Open-Meteo, no API
+  key), and `remind_me` (schedules a message back to the chat after a
+  delay — lost if the bot restarts before it fires, same as conversation
+  history).
 - **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
   `medium`/`large-v3`) trades off speed for accuracy — `small` is a
   reasonable default on CPU. Every transcription is prefixed with
@@ -259,7 +265,8 @@ docker compose down                                # stop and remove the contain
 Downloaded Ollama models persist in the `ollama_data` Docker volume across
 `docker compose down`/`up` — they're only re-downloaded if you remove that
 volume too (`docker compose down -v`). The Whisper model works the same way,
-in the `whisper_data` volume.
+in the `whisper_data` volume, as do notes saved via the `remember` tool, in
+`memory_data`.
 
 ## Possible next steps
 

@@ -11,12 +11,15 @@ import app.bot as bot_module
 from app.bot import (
     COMPACTING_NOTICE,
     COMPACTION_SYSTEM_PROMPT,
+    TOOL_CALL_LABELS,
     VOICE_TRANSCRIPTION_PREFIX,
     _build_system_message,
     _compact_history,
     _estimate_tokens,
     _get_whisper_model,
     _is_allowed,
+    _make_on_tool_call,
+    _make_tool_context,
     _split_recent,
     _transcribe_sync,
     _trim_to_token_budget,
@@ -283,7 +286,10 @@ async def test_handle_message_passes_enabled_tools_to_the_llm():
     await handle_message(make_update(text="search something"), make_context())
 
     llm_client.chat.assert_awaited_once()
-    assert llm_client.chat.call_args.kwargs == {"tools": [SEARCH_WEB_TOOL]}
+    kwargs = llm_client.chat.call_args.kwargs
+    assert kwargs["tools"] == [SEARCH_WEB_TOOL]
+    assert kwargs["context"].chat_id == 42
+    assert callable(kwargs["on_tool_call"])
 
 
 async def test_handle_message_omits_tools_kwarg_when_none_enabled():
@@ -308,6 +314,105 @@ async def test_handle_message_ignores_unknown_tool_names():
     await handle_message(make_update(), make_context())
 
     assert llm_client.chat.call_args.kwargs == {}
+
+
+async def test_handle_message_relays_tool_call_notifications_to_telegram():
+    config = make_config(enabled_tools=["search_web"])
+    llm_client = AsyncMock()
+
+    async def fake_chat(messages, tools=None, context=None, on_tool_call=None):
+        if on_tool_call:
+            await on_tool_call("search_web")
+        return "the answer"
+
+    llm_client.chat = AsyncMock(side_effect=fake_chat)
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+    update = make_update(text="search something")
+
+    await handle_message(update, make_context())
+
+    update.message.reply_text.assert_any_call(TOOL_CALL_LABELS["search_web"])
+    update.message.reply_text.assert_any_call("the answer")
+
+
+def make_fake_application():
+    # A real ptb Application's `.bot` is a frozen TelegramObject that
+    # refuses attribute overrides, so send_message can't be mocked on it
+    # directly — a lightweight stand-in exercises the same two attributes
+    # _make_tool_context actually uses (bot_data, bot.send_message).
+    application = MagicMock()
+    application.bot_data = {}
+    application.bot.send_message = AsyncMock()
+    return application
+
+
+def test_make_tool_context_returns_context_with_given_chat_id():
+    app = make_fake_application()
+
+    context = _make_tool_context(app, 42)
+
+    assert context.chat_id == 42
+
+
+async def test_schedule_reminder_sends_message_after_delay(monkeypatch):
+    app = make_fake_application()
+    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
+
+    context = _make_tool_context(app, 42)
+    context.schedule_reminder(300, "Call mom")
+    task = next(iter(app.bot_data["reminder_tasks"]))
+    await task
+
+    app.bot.send_message.assert_awaited_once_with(42, "⏰ Reminder: Call mom")
+
+
+async def test_schedule_reminder_task_removes_itself_once_done(monkeypatch):
+    # Regression test for the same asyncio gotcha as the warm-up task: the
+    # task must be stored somewhere (bot_data) while pending, and cleaned up
+    # afterward instead of leaking forever in that set.
+    app = make_fake_application()
+    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
+
+    context = _make_tool_context(app, 42)
+    context.schedule_reminder(300, "Call mom")
+    task = next(iter(app.bot_data["reminder_tasks"]))
+    await task
+
+    assert app.bot_data["reminder_tasks"] == set()
+
+
+async def test_schedule_reminder_logs_instead_of_raising_on_send_failure(monkeypatch, caplog):
+    app = make_fake_application()
+    app.bot.send_message = AsyncMock(side_effect=RuntimeError("network down"))
+    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
+
+    context = _make_tool_context(app, 42)
+    context.schedule_reminder(300, "Call mom")
+    task = next(iter(app.bot_data["reminder_tasks"]))
+
+    with caplog.at_level(logging.ERROR, logger="app.bot"):
+        await task  # must not raise
+
+    assert "failed sending reminder" in caplog.text.lower()
+
+
+async def test_on_tool_call_sends_friendly_label_for_known_tool():
+    update = make_update()
+    on_tool_call = _make_on_tool_call(update)
+
+    await on_tool_call("search_web")
+
+    update.message.reply_text.assert_awaited_once_with(TOOL_CALL_LABELS["search_web"])
+
+
+async def test_on_tool_call_falls_back_to_generic_label_for_unknown_tool():
+    update = make_update()
+    on_tool_call = _make_on_tool_call(update)
+
+    await on_tool_call("some_future_tool")
+
+    update.message.reply_text.assert_awaited_once_with("🔧 Using some_future_tool...")
 
 
 async def test_handle_message_denies_disallowed_user():

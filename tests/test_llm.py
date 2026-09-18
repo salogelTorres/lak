@@ -2,7 +2,7 @@ import pytest
 
 from app.config import Config
 from app.llm import CloudClient, OllamaClient, _call_tool, build_llm_client
-from app.tools.base import Tool
+from app.tools.base import Tool, ToolContext
 
 
 class FakeResponse:
@@ -316,6 +316,59 @@ async def test_call_tool_defaults_arguments_on_invalid_json():
     await _call_tool({"t": tool}, make_tool_call("call1", "t", "not json"))
 
     assert received == {}
+
+
+async def test_call_tool_passes_context_to_tools_that_need_it():
+    received = {}
+
+    def record(*, context, note):
+        received["context"] = context
+        received["note"] = note
+        return "ok"
+
+    tool = Tool(name="t", description="d", parameters={}, execute=record, needs_context=True)
+    call = {"id": "call1", "type": "function", "function": {"name": "t", "arguments": {"note": "hi"}}}
+    context = ToolContext(chat_id=42, schedule_reminder=lambda *a: None)
+
+    await _call_tool({"t": tool}, call, context)
+
+    assert received["context"] is context
+    assert received["note"] == "hi"
+
+
+async def test_call_tool_omits_context_for_tools_that_do_not_need_it():
+    received = {}
+
+    def record(**kwargs):
+        received.update(kwargs)
+        return "ok"
+
+    tool = Tool(name="t", description="d", parameters={}, execute=record)
+
+    await _call_tool({"t": tool}, make_tool_call("call1", "t", "{}"), ToolContext(42, lambda *a: None))
+
+    assert "context" not in received
+
+
+async def test_ollama_client_notifies_on_tool_call_before_running_it(patch_async_client_sequence):
+    import app.llm as llm_module
+
+    responses = [
+        FakeResponse({"message": {"content": None, "tool_calls": [make_tool_call("call1", "greet", '{"name": "Luis"}')]}}),
+        FakeResponse({"message": {"content": "Hello, Luis!"}}),
+    ]
+    patch_async_client_sequence(llm_module.httpx, responses)
+    tool = make_greet_tool()
+    client = OllamaClient("http://ollama:11434", "llama3")
+    notified = []
+
+    async def on_tool_call(name: str) -> None:
+        notified.append(name)
+
+    result = await client.chat([{"role": "user", "content": "greet Luis"}], tools=[tool], on_tool_call=on_tool_call)
+
+    assert result == "Hello, Luis!"
+    assert notified == ["greet"]
 
 
 async def test_call_tool_catches_execution_errors_instead_of_raising():

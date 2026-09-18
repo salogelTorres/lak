@@ -20,13 +20,23 @@ if Ollama's port is published).
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import app.llm as llm_module
+import app.tools.memory as memory_module
 from app.config import Config
 from app.tools import resolve_tools
+from app.tools.base import ToolContext
+
+# A fixed, isolated chat id/memory file for the duration of a run, so evals
+# never read or write the real agent's remembered notes and are repeatable
+# from a clean slate every time.
+EVAL_CHAT_ID = -1
 
 
 @dataclass(frozen=True)
@@ -34,12 +44,12 @@ class EvalCase:
     name: str
     system_prompt: str
     user_message: str
-    # judge(reply, tool_names_called_in_order) -> (passed, reason)
-    judge: Callable[[str, list[str]], tuple[bool, str]]
+    # judge(reply, tool_names_called_in_order, recorded_reminders) -> (passed, reason)
+    judge: Callable[[str, list[str], list[tuple[float, str]]], tuple[bool, str]]
 
 
-def used_tool(name: str) -> Callable[[str, list[str]], tuple[bool, str]]:
-    def judge(reply: str, tools_called: list[str]) -> tuple[bool, str]:
+def used_tool(name: str) -> Callable[[str, list[str], list], tuple[bool, str]]:
+    def judge(reply: str, tools_called: list[str], _reminders: list) -> tuple[bool, str]:
         if name in tools_called:
             return True, f"called {name!r} as expected"
         return False, f"expected a call to {name!r}, got {tools_called or 'no tool calls'}"
@@ -47,11 +57,45 @@ def used_tool(name: str) -> Callable[[str, list[str]], tuple[bool, str]]:
     return judge
 
 
-def used_no_tools() -> Callable[[str, list[str]], tuple[bool, str]]:
-    def judge(reply: str, tools_called: list[str]) -> tuple[bool, str]:
+def used_no_tools() -> Callable[[str, list[str], list], tuple[bool, str]]:
+    def judge(reply: str, tools_called: list[str], _reminders: list) -> tuple[bool, str]:
         if not tools_called:
             return True, "used no tools, as expected"
         return False, f"expected no tool calls, got {tools_called}"
+
+    return judge
+
+
+def used_weather_and_mentioned_a_temperature() -> Callable[[str, list[str], list], tuple[bool, str]]:
+    """Stronger than used_tool: also checks the reply actually surfaces a
+    temperature reading rather than the tool call succeeding but the model
+    ignoring its result."""
+
+    def judge(reply: str, tools_called: list[str], _reminders: list) -> tuple[bool, str]:
+        if "get_weather" not in tools_called:
+            return False, f"expected a call to 'get_weather', got {tools_called or 'no tool calls'}"
+        if "°" not in reply and "degrees" not in reply.lower():
+            return False, f"called get_weather but reply doesn't mention a temperature: {reply!r}"
+        return True, "called get_weather and reported a temperature"
+
+    return judge
+
+
+def scheduled_a_reminder() -> Callable[[str, list[str], list[tuple[float, str]]], tuple[bool, str]]:
+    """Stronger than used_tool: checks remind_me was actually invoked with a
+    sane (positive, non-trivial) delay, not just that the model called it."""
+
+    def judge(reply: str, tools_called: list[str], reminders: list[tuple[float, str]]) -> tuple[bool, str]:
+        if "remind_me" not in tools_called:
+            return False, f"expected a call to 'remind_me', got {tools_called or 'no tool calls'}"
+        if not reminders:
+            return False, "remind_me was called but scheduled nothing (execution likely failed)"
+        delay_seconds, message = reminders[-1]
+        if delay_seconds <= 0:
+            return False, f"scheduled a non-positive delay: {delay_seconds}"
+        if not message.strip():
+            return False, "scheduled a reminder with an empty message"
+        return True, f"scheduled a reminder in {delay_seconds:g}s: {message!r}"
 
     return judge
 
@@ -76,6 +120,18 @@ CASES = [
         judge=used_tool("fetch_page"),
     ),
     EvalCase(
+        name="uses get_weather and reports an actual temperature",
+        system_prompt="You are a helpful assistant.",
+        user_message="What's the weather like in Madrid right now?",
+        judge=used_weather_and_mentioned_a_temperature(),
+    ),
+    EvalCase(
+        name="uses remind_me with a sane delay when asked to be reminded",
+        system_prompt="You are a helpful assistant.",
+        user_message="Remind me to call my dentist in 20 minutes.",
+        judge=scheduled_a_reminder(),
+    ),
+    EvalCase(
         name="does not reach for tools on basic chit-chat",
         system_prompt="You are a helpful assistant.",
         user_message="Hi! How are you today?",
@@ -92,25 +148,67 @@ CASES = [
 
 async def _run_case(case: EvalCase, config: Config) -> tuple[bool, str]:
     tools_called: list[str] = []
+    reminders: list[tuple[float, str]] = []
     original_call_tool = llm_module._call_tool
 
-    async def spying_call_tool(tools_by_name, call):
+    async def spying_call_tool(tools_by_name, call, context=None):
         tools_called.append(call.get("function", {}).get("name", ""))
-        return await original_call_tool(tools_by_name, call)
+        return await original_call_tool(tools_by_name, call, context)
 
     llm_module._call_tool = spying_call_tool
     try:
         client = llm_module.build_llm_client(config)
         tools = resolve_tools(config.enabled_tools)
+        context = ToolContext(
+            chat_id=EVAL_CHAT_ID, schedule_reminder=lambda delay, message: reminders.append((delay, message))
+        )
         messages = [
             {"role": "system", "content": case.system_prompt},
             {"role": "user", "content": case.user_message},
         ]
-        reply = await client.chat(messages, tools=tools)
+        reply = await client.chat(messages, tools=tools, context=context)
     finally:
         llm_module._call_tool = original_call_tool
 
-    return case.judge(reply, tools_called)
+    return case.judge(reply, tools_called, reminders)
+
+
+async def _run_memory_round_trip(config: Config, memory_file: Path) -> tuple[bool, str]:
+    """Strong eval for remember/recall: unlike the single-turn cases above,
+    this actually checks persistence — that a fact saved in one exchange
+    comes back correctly in a *separate* one, via the real memory file on
+    disk, not just that the model chose to call the right tool name.
+    """
+    memory_module.MEMORY_FILE = memory_file
+    tools = resolve_tools(config.enabled_tools)
+    context = ToolContext(chat_id=EVAL_CHAT_ID, schedule_reminder=lambda *_: None)
+    client = llm_module.build_llm_client(config)
+
+    remember_prompt = [
+        {"role": "system", "content": "You are a helpful assistant. Use remember to save durable facts the user shares."},
+        {"role": "user", "content": "Please remember that my favorite color is turquoise."},
+    ]
+    await client.chat(remember_prompt, tools=tools, context=context)
+
+    if str(EVAL_CHAT_ID) not in _load_chat_ids(memory_file):
+        return False, "remember didn't persist anything to the memory file"
+
+    recall_prompt = [
+        {"role": "system", "content": "You are a helpful assistant. Use recall to check what you remember about the user."},
+        {"role": "user", "content": "What do you remember about my favorite color?"},
+    ]
+    reply = await client.chat(recall_prompt, tools=tools, context=context)
+
+    if "turquoise" not in reply.lower():
+        return False, f"recall didn't surface the remembered fact in the reply: {reply!r}"
+    return True, "remembered fact persisted and was correctly recalled in a separate exchange"
+
+
+def _load_chat_ids(memory_file: Path) -> list[str]:
+    try:
+        return list(json.loads(memory_file.read_text(encoding="utf-8")).keys())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
 
 async def main() -> int:
@@ -126,7 +224,15 @@ async def main() -> int:
         print(f"[{'PASS' if passed else 'FAIL'}] {case.name}: {reason}")
         failures += 0 if passed else 1
 
-    print(f"\n{len(CASES) - failures}/{len(CASES)} passed.")
+    total = len(CASES)
+    if {"remember", "recall"} <= set(config.enabled_tools):
+        total += 1
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            passed, reason = await _run_memory_round_trip(config, Path(tmp_dir) / "eval_memory.json")
+            print(f"[{'PASS' if passed else 'FAIL'}] remember/recall round-trips across a separate exchange: {reason}")
+            failures += 0 if passed else 1
+
+    print(f"\n{total - failures}/{total} passed.")
     return 1 if failures else 0
 
 

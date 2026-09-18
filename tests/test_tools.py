@@ -1,9 +1,14 @@
 import httpx
 
 from app.tools import AVAILABLE_TOOLS, resolve_tools
-from app.tools.base import Tool
+from app.tools.base import Tool, ToolContext
 from app.tools.fetch_page import TOOL as FETCH_PAGE_TOOL
 from app.tools.fetch_page import fetch_page
+from app.tools.memory import RECALL_TOOL, REMEMBER_TOOL
+from app.tools.reminders import TOOL as REMIND_ME_TOOL
+from app.tools.reminders import remind_me
+from app.tools.weather import TOOL as WEATHER_TOOL
+from app.tools.weather import get_weather
 from app.tools.web_search import TOOL, search_web
 
 
@@ -22,6 +27,13 @@ def test_available_tools_includes_search_web():
 
 def test_available_tools_includes_fetch_page():
     assert AVAILABLE_TOOLS["fetch_page"] is FETCH_PAGE_TOOL
+
+
+def test_available_tools_includes_memory_weather_and_reminders():
+    assert AVAILABLE_TOOLS["remember"] is REMEMBER_TOOL
+    assert AVAILABLE_TOOLS["recall"] is RECALL_TOOL
+    assert AVAILABLE_TOOLS["get_weather"] is WEATHER_TOOL
+    assert AVAILABLE_TOOLS["remind_me"] is REMIND_ME_TOOL
 
 
 def test_resolve_tools_looks_up_known_names_and_skips_unknown():
@@ -277,3 +289,203 @@ def test_fetch_page_normalizes_protocol_less_url(monkeypatch):
     fetch_page("example.com/no-protocol")
 
     assert fake.requested_url == "https://example.com/no-protocol"
+
+
+import app.tools.memory as memory_module
+from app.tools.reminders import MAX_MINUTES
+
+
+def make_tool_context(chat_id=1):
+    return ToolContext(chat_id=chat_id, schedule_reminder=lambda *a: None)
+
+
+def test_remember_and_recall_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", tmp_path / "memory.json")
+
+    remember_result = memory_module.remember("Buy milk", context=make_tool_context(1))
+    recall_result = memory_module.recall(context=make_tool_context(1))
+
+    assert "Buy milk" in remember_result
+    assert "Buy milk" in recall_result
+
+
+def test_recall_is_isolated_per_chat(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", tmp_path / "memory.json")
+
+    memory_module.remember("Chat one's note", context=make_tool_context(1))
+
+    assert "Chat one's note" not in memory_module.recall(context=make_tool_context(2))
+
+
+def test_recall_reports_when_nothing_remembered(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", tmp_path / "memory.json")
+
+    result = memory_module.recall(context=make_tool_context(1))
+
+    assert "nothing" in result.lower()
+
+
+def test_remember_rejects_empty_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", tmp_path / "memory.json")
+
+    result = memory_module.remember("   ", context=make_tool_context(1))
+
+    assert "no note" in result.lower()
+
+
+def test_remember_caps_notes_per_chat(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", tmp_path / "memory.json")
+    monkeypatch.setattr(memory_module, "MAX_NOTES_PER_CHAT", 3)
+
+    for i in range(5):
+        memory_module.remember(f"note {i}", context=make_tool_context(1))
+
+    notes = memory_module.recall(context=make_tool_context(1))
+    assert "note 0" not in notes
+    assert "note 1" not in notes
+    assert "note 4" in notes
+
+
+def test_memory_load_recovers_from_corrupt_file(tmp_path, monkeypatch):
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(memory_module, "MEMORY_FILE", memory_file)
+
+    result = memory_module.recall(context=make_tool_context(1))
+
+    assert "nothing" in result.lower()
+
+
+class FakeWeatherResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class FakeWeatherClient:
+    def __init__(self, geo_payload, forecast_payload):
+        self._geo_payload = geo_payload
+        self._forecast_payload = forecast_payload
+        self.requests = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, params=None):
+        self.requests.append((url, params))
+        if "geocoding" in url:
+            return FakeWeatherResponse(self._geo_payload)
+        return FakeWeatherResponse(self._forecast_payload)
+
+
+def patch_weather_client(monkeypatch, geo_payload, forecast_payload):
+    fake = FakeWeatherClient(geo_payload, forecast_payload)
+    monkeypatch.setattr("app.tools.weather.httpx.Client", lambda **kwargs: fake)
+    return fake
+
+
+GEO_MADRID = {
+    "results": [
+        {"name": "Madrid", "admin1": "Madrid", "country": "Spain", "latitude": 40.4, "longitude": -3.7}
+    ]
+}
+FORECAST_SUNNY = {"current": {"temperature_2m": 21.5, "weather_code": 0, "wind_speed_10m": 10.0}}
+
+
+def test_get_weather_returns_formatted_summary(monkeypatch):
+    patch_weather_client(monkeypatch, GEO_MADRID, FORECAST_SUNNY)
+
+    result = get_weather("Madrid")
+
+    assert "Madrid" in result
+    assert "21.5" in result
+    assert "clear sky" in result
+    assert "10.0" in result
+
+
+def test_get_weather_uses_coordinates_from_geocoding(monkeypatch):
+    fake = patch_weather_client(monkeypatch, GEO_MADRID, FORECAST_SUNNY)
+
+    get_weather("Madrid")
+
+    _, params = fake.requests[1]
+    assert params["latitude"] == 40.4
+    assert params["longitude"] == -3.7
+
+
+def test_get_weather_reports_unknown_location(monkeypatch):
+    patch_weather_client(monkeypatch, {"results": []}, FORECAST_SUNNY)
+
+    result = get_weather("Nowhereville")
+
+    assert "Could not find" in result
+
+
+def test_get_weather_falls_back_for_unknown_weather_code(monkeypatch):
+    patch_weather_client(
+        monkeypatch, GEO_MADRID, {"current": {"temperature_2m": 5.0, "weather_code": 999, "wind_speed_10m": 3.0}}
+    )
+
+    result = get_weather("Madrid")
+
+    assert "unknown conditions" in result
+
+
+def test_get_weather_reports_incomplete_data(monkeypatch):
+    patch_weather_client(monkeypatch, GEO_MADRID, {"current": {}})
+
+    result = get_weather("Madrid")
+
+    assert "incomplete" in result
+
+
+def test_get_weather_reports_network_failure(monkeypatch):
+    def _raise(**kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr("app.tools.weather.httpx.Client", _raise)
+
+    result = get_weather("Madrid")
+
+    assert "Could not fetch weather" in result
+
+
+def test_get_weather_rejects_empty_location():
+    assert "no location" in get_weather("   ").lower()
+
+
+def test_remind_me_schedules_and_confirms():
+    scheduled = []
+    context = ToolContext(chat_id=1, schedule_reminder=lambda delay, msg: scheduled.append((delay, msg)))
+
+    result = remind_me(5, "Call mom", context=context)
+
+    assert scheduled == [(300, "Call mom")]
+    assert "5" in result
+    assert "Call mom" in result
+
+
+def test_remind_me_rejects_empty_message():
+    result = remind_me(5, "   ", context=make_tool_context())
+
+    assert "no reminder message" in result.lower()
+
+
+def test_remind_me_rejects_non_positive_minutes():
+    result = remind_me(0, "hi", context=make_tool_context())
+
+    assert "positive number" in result.lower()
+
+
+def test_remind_me_rejects_too_far_out():
+    result = remind_me(MAX_MINUTES + 1, "hi", context=make_tool_context())
+
+    assert "too far out" in result.lower()

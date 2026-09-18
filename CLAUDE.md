@@ -126,7 +126,36 @@ required.
   via `tools/_html.py` rather than duplicating it — keep any new
   HTML-scraping tool on that shared module too, since letting the
   injection-redaction rules drift apart per tool is exactly the kind of
-  thing that's easy to miss.
+  thing that's easy to miss. `get_weather` (`weather.py`) is a stateless
+  two-request lookup against Open-Meteo (geocode a place name, then fetch
+  its forecast), no API key needed, same never-raise-on-failure philosophy
+  as the other two.
+
+  `memory.py` (`remember`/`recall`) and `reminders.py` (`remind_me`) are
+  different: they need to know *which chat* they're running in, which the
+  model must never supply itself (it could get it wrong, or a user could
+  try to make it target another chat). `tools/base.py`'s `ToolContext`
+  (`chat_id` + a `schedule_reminder` callback) is injected by
+  `app.llm._call_tool()` for any `Tool` with `needs_context=True`, threaded
+  in from `bot.py`'s `_make_tool_context()` — never sourced from the model's
+  own arguments. `remember`/`recall` persist to a single JSON file
+  (`MEMORY_FILE`, default `/data/memory/memory.json`, keyed by `chat_id`,
+  guarded by a `threading.Lock` since tool execution runs in a thread pool)
+  backed by the `memory_data` volume in `docker-compose.yml`, so notes
+  survive restarts unlike the in-memory conversation history. `remind_me`
+  doesn't deliver anything itself — it validates the request and hands off
+  to `context.schedule_reminder`, which `bot.py` implements with a plain
+  `asyncio.create_task` + `asyncio.sleep` (stored on `application.bot_data`
+  for the same GC-safety reason as the warm-up task below) rather than a
+  real job queue; like conversation history, a pending reminder is lost if
+  the bot restarts before it fires — acceptable for this template, but
+  worth knowing.
+
+  Every tool call is also announced to the chat right before it runs
+  (`bot.py`'s `_make_on_tool_call()`, threaded into `_run_with_tools()` as
+  `on_tool_call`) via `TOOL_CALL_LABELS`, so a call that takes a few seconds
+  doesn't look like the bot has stalled — a tool with no entry there still
+  gets a generic `"🔧 Using {name}..."` message rather than silence.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or
@@ -172,15 +201,21 @@ required.
 
 **`evals/`** (repo root, outside the `app` package) is a manual eval suite,
 separate from `tests/`: it calls the real configured backend and judges the
-model's own tool-use choices (does it call `search_web` for a current-events
-question, reach for `fetch_page` when a snippet isn't enough, stay quiet on
-tools for chit-chat). It's slow and not fully deterministic, so it never
-runs as part of `pytest` and isn't subject to the coverage gate — run it by
-hand with `python -m evals.run` (usually via `docker compose exec bot`, so
-`OLLAMA_BASE_URL`'s default resolves over the Compose network). It spies on
-`app.llm._call_tool` by monkeypatching the module attribute for the duration
-of each case rather than instrumenting the real code path, so production
-behavior is untouched by the eval harness existing.
+model's own tool-use choices — does it call `search_web` for a
+current-events question, reach for `fetch_page` when a snippet isn't
+enough, call `get_weather` *and* actually report a temperature from it,
+schedule a sane (positive-delay, non-empty-message) reminder via
+`remind_me`, stay quiet on tools for chit-chat. It's slow and not fully
+deterministic, so it never runs as part of `pytest` and isn't subject to
+the coverage gate — run it by hand with `python -m evals.run` (usually via
+`docker compose exec bot`, so `OLLAMA_BASE_URL`'s default resolves over the
+Compose network). It spies on `app.llm._call_tool` by monkeypatching the
+module attribute for the duration of each case rather than instrumenting
+the real code path, so production behavior is untouched by the eval
+harness existing. The `remember`/`recall` case is the strongest one: rather
+than checking a tool got called, it points `memory.MEMORY_FILE` at a throwaway
+temp file and verifies a fact saved in one exchange is correctly surfaced
+back in a *separate* one — real persistence, not just tool selection.
 
 **Docker**: `docker-compose.yml` defines `bot` and `ollama` as separate
 services on the Compose network; the bot always reaches Ollama at
@@ -188,5 +223,6 @@ services on the Compose network; the bot always reaches Ollama at
 just sits idle if `LLM_BACKEND=cloud`). `app/prompts/` is bind-mounted into
 the container read-only so prompt edits take effect with
 `docker compose restart` — no rebuild needed. Ollama's model cache lives in
-the named volume `ollama_data`, and Whisper's in `whisper_data`, both
-surviving `down`/`up` but not `down -v`.
+the named volume `ollama_data`, Whisper's in `whisper_data`, and the
+`remember`/`recall` memory file in `memory_data`, all surviving `down`/`up`
+but not `down -v`.

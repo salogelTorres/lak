@@ -9,7 +9,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.config import Config
-from app.tools.base import Tool
+from app.tools.base import Tool, ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,20 @@ ToolCall = dict[str, Any]
 MAX_TOOL_ROUNDS = 6
 
 
+# Notified with a tool's name right before it runs, so the caller can let
+# the user know something's happening (a tool call can take a few seconds —
+# a web request, a file write — while the chat otherwise looks stalled).
+OnToolCall = Callable[[str], Awaitable[None]]
+
+
 class LLMClient(Protocol):
-    async def chat(self, messages: list[Message], tools: list[Tool] | None = None) -> str: ...  # pragma: no cover
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None = None,
+        context: ToolContext | None = None,
+        on_tool_call: OnToolCall | None = None,
+    ) -> str: ...  # pragma: no cover
 
 
 # Sends one request and returns the raw assistant message dict. Implemented
@@ -45,7 +57,13 @@ async def _post_json(
         return resp.json()
 
 
-async def _run_with_tools(complete: Complete, messages: list[Message], tools: list[Tool] | None) -> str:
+async def _run_with_tools(
+    complete: Complete,
+    messages: list[Message],
+    tools: list[Tool] | None,
+    context: ToolContext | None = None,
+    on_tool_call: OnToolCall | None = None,
+) -> str:
     """Drive an OpenAI-style tool-calling loop shared by both backends.
 
     `complete` sends one request and returns the raw assistant message dict
@@ -68,12 +86,14 @@ async def _run_with_tools(complete: Complete, messages: list[Message], tools: li
 
         conversation.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
         for call in calls:
-            conversation.append(await _call_tool(tools_by_name, call))
+            if on_tool_call:
+                await on_tool_call(call.get("function", {}).get("name", ""))
+            conversation.append(await _call_tool(tools_by_name, call, context))
 
     return "I tried using some tools but couldn't get to an answer. Could you rephrase?"
 
 
-async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall) -> Message:
+async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall, context: ToolContext | None = None) -> Message:
     function: dict[str, Any] = call.get("function", {})
     name: str = function.get("name", "")
     call_id: str = call.get("id", "")
@@ -94,7 +114,10 @@ async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall) -> Message:
         arguments = raw_arguments
 
     try:
-        result = await asyncio.to_thread(tool.execute, **arguments)
+        if tool.needs_context:
+            result = await asyncio.to_thread(tool.execute, context=context, **arguments)
+        else:
+            result = await asyncio.to_thread(tool.execute, **arguments)
     except Exception:
         logger.exception("Tool %r failed", name)
         result = f"The {name} tool failed to run."
@@ -114,7 +137,13 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def chat(self, messages: list[Message], tools: list[Tool] | None = None) -> str:
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None = None,
+        context: ToolContext | None = None,
+        on_tool_call: OnToolCall | None = None,
+    ) -> str:
         async def complete(msgs: list[Message], offered_tools: list[Tool] | None) -> Message:
             payload: dict[str, Any] = {"model": self.model, "messages": msgs, "stream": False}
             if offered_tools:
@@ -122,7 +151,7 @@ class OllamaClient:
             data = await _post_json(f"{self.base_url}/api/chat", payload, headers=None, timeout=self.TIMEOUT)
             return data["message"]
 
-        return await _run_with_tools(complete, messages, tools)
+        return await _run_with_tools(complete, messages, tools, context, on_tool_call)
 
 
 class CloudClient:
@@ -133,7 +162,13 @@ class CloudClient:
         self.api_key = api_key
         self.model = model
 
-    async def chat(self, messages: list[Message], tools: list[Tool] | None = None) -> str:
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None = None,
+        context: ToolContext | None = None,
+        on_tool_call: OnToolCall | None = None,
+    ) -> str:
         async def complete(msgs: list[Message], offered_tools: list[Tool] | None) -> Message:
             payload: dict[str, Any] = {"model": self.model, "messages": msgs}
             if offered_tools:
@@ -147,7 +182,7 @@ class CloudClient:
             )
             return data["choices"][0]["message"]
 
-        return await _run_with_tools(complete, messages, tools)
+        return await _run_with_tools(complete, messages, tools, context, on_tool_call)
 
 
 def build_llm_client(config: Config) -> LLMClient:
