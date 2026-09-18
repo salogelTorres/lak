@@ -39,34 +39,61 @@ Two prompting techniques were tested:
 Raw per-call JSON for every run lives in `evals/results/`
 (`router_bench_qwen3-*.json` / `*_v2.json`) — gitignored, host-local only.
 
+### v3 — GLiClass multilang-mini (encoder classifier, not generative)
+
+A fair objection to "small models don't classify well" was raised: `qwen3
+0.6b/4b` are generative LMs pressed into classifying, not a purpose-built
+classifier. [GLiClass](https://github.com/knowledgator/gliclass)
+(`knowledgator/gliclass-multilang-mini`, ~284M, multilingual zero-shot
+single/multi-label classification) is architecturally the right kind of
+tool for this, so it deserved its own test before ruling out "any small
+model" — installed temporarily (`pip install torch --index-url
+https://download.pytorch.org/whl/cpu gliclass`) inside the running bot
+container, no lasting changes, run against the exact same 107 cases via
+`evals.router_bench.summarize`/`baseline_accuracy` for directly
+comparable numbers.
+
+| Model | Majority acc | THINK recall | NO_THINK recall | Median latency |
+|---|---|---|---|---|
+| gliclass-multilang-mini | **39.3%** (worse than the 60.7% baseline) | 100% | **0.0%** | 321ms |
+
+It labels **every single case** "needs careful step-by-step reasoning"
+(~99% confidence each time), regardless of prompt, few-shot examples, or
+label wording tried. A sanity check confirms this isn't a misuse bug: the
+same pipeline nails a plain sentiment task (`positive`/`negative`, 100%
+confidence, both directions correct) instantly. The model works — it just
+hasn't learned "does this need reasoning" as a property; unlike
+sentiment/topic, that isn't lexically or topically groundable, and
+GLiClass's training data (commonsense_qa + logic datasets, per its model
+card) apparently didn't teach it either. Per the pre-agreed bar ("85-90%
+→ the discussion is over"), this ends it decisively — no closer to a
+verdict than "worse than guessing."
+
 ## Conclusion
 
-**Neither small model works, and it isn't a prompting problem.** With the
-format fixed, `qwen3:0.6b` is still mediocre and inconsistent across
-categories. `qwen3:4b` is *worse than guessing*: it says THINK for almost
-everything (7.7% NO_THINK recall — e.g. misclassifies "hola" and "15+27").
-This looks like a genuine judgment-capacity gap in smaller Qwen models for
-this specific semantic task ("does this need reasoning"), not something a
-better prompt or output format fixes.
+**No small or purpose-built classifier beats `qwen3:8b` on this task —
+not `qwen3:0.6b`/`4b` (a prompting/format problem, partially fixable),
+and not GLiClass (a genuine capability gap, not fixable by prompting).**
+`qwen3:8b` itself is the router: structured output + temperature 0 cut
+its latency from 5.0s to 0.78s (6.4x) while keeping THINK recall at 100%
+(never misses a case that genuinely needs reasoning — the expensive kind
+of error). The 9.2% false-positive rate on NO_THINK cases (over-triggering
+on a few easy ones) only costs latency, not quality.
 
-**`qwen3:8b` itself is the only viable router**, and structured output +
-temperature 0 cut its latency from 5.0s to 0.78s (6.4x) while keeping
-THINK recall at 100% (never misses a case that genuinely needs reasoning —
-the expensive kind of error). The 9.2% false-positive rate on NO_THINK
-cases (over-triggering on a few easy ones) only costs latency, not quality.
-
-**Revised plan (pending confirmation, not yet implemented):** no separate
-router model, no GLiClass. Wire `qwen3:8b` as its own router (structured
-output, `think:false`, `temperature:0`) into `app/bot.py`/`app/llm.py`
-before the main reply, gating the real `think:true` call on its decision.
-Cost: ~0.8s added per message to unlock extended reasoning (currently
-5-10+ min unconditionally) only when actually warranted.
+**Decision: wire `qwen3:8b` as its own router** (structured output,
+`think:false`, `temperature:0`) into `app/bot.py`/`app/llm.py` before the
+main reply, gating the real `think:true` call on its decision. Cost:
+~0.8s added per message to unlock extended reasoning (currently
+5-10+ min unconditionally) only when actually warranted. GLiClass/torch
+were installed only inside the running container for this test, never
+added to the Dockerfile/requirements — nothing to roll back.
 
 ## Open questions for next session
 
-- Confirm and implement the wiring above (was Paso 3 of the original
-  plan, now simplified — no model switch needed).
-- Worth trying: lowering the decision threshold, or a quick check with
-  `qwen3:1.7b` (untested; likely to share the small-model judgment gap).
+- Implement the wiring above (was Paso 3 of the original plan).
+- Optional, not required to close this: a confidence-gated cascade
+  (skip the router call outright on lexically obvious cases) or the
+  BGE-M3 + logistic-regression head once real labeled traffic exists —
+  both deferred, no model available today makes them necessary.
 - `evals/results/` is gitignored — this file documents the finding
   independent of the raw JSON surviving on this machine.
