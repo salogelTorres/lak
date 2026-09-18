@@ -69,31 +69,76 @@ card) apparently didn't teach it either. Per the pre-agreed bar ("85-90%
 → the discussion is over"), this ends it decisively — no closer to a
 verdict than "worse than guessing."
 
-## Conclusion
+### v4 — newer-generation small models (structured output, temperature 0)
 
-**No small or purpose-built classifier beats `qwen3:8b` on this task —
-not `qwen3:0.6b`/`4b` (a prompting/format problem, partially fixable),
-and not GLiClass (a genuine capability gap, not fixable by prompting).**
-`qwen3:8b` itself is the router: structured output + temperature 0 cut
-its latency from 5.0s to 0.78s (6.4x) while keeping THINK recall at 100%
-(never misses a case that genuinely needs reasoning — the expensive kind
-of error). The 9.2% false-positive rate on NO_THINK cases (over-triggering
-on a few easy ones) only costs latency, not quality.
+Objection: v1-v3 only tried `qwen3` small variants (same generation as the
+8B) plus one non-generative classifier. A genuinely newer generation might
+have closed the gap through better instruction-following, independent of
+raw size. Tested standalone (100% GPU where the model fits), same 107
+cases, same JSON schema, `think:false`, `temperature:0`.
 
-**Decision: wire `qwen3:8b` as its own router** (structured output,
-`think:false`, `temperature:0`) into `app/bot.py`/`app/llm.py` before the
-main reply, gating the real `think:true` call on its decision. Cost:
-~0.8s added per message to unlock extended reasoning (currently
-5-10+ min unconditionally) only when actually warranted. GLiClass/torch
-were installed only inside the running container for this test, never
-added to the Dockerfile/requirements — nothing to roll back.
+| Model | Scenario | Majority acc | THINK recall | NO_THINK recall | Median latency |
+|---|---|---|---|---|---|
+| **qwen3.5:4b** | standalone, 100% GPU (3.1GB) | **96.3%** | 97.6% | 95.4% | **450ms** |
+| qwen3.5:9b | standalone, 45/55 CPU/GPU (6.1GB, doesn't fully fit) | **99.1%** | 97.6% | 100% | 1485ms |
+| ministral-3:3b | standalone, 100% GPU (2.7GB) | 91.6% | 83.3% | 96.9% | 230ms |
+| phi4-mini | standalone, 100% GPU (3.1GB) | 74.8% | **38.1%** | 98.5% | 294ms |
+| qwen3.5:2b | standalone, 100% GPU (2.4GB) | 75.7% | **40.5%** | 98.5% | 392ms |
+
+For reference, `qwen3:8b` (v2 baseline): 94.4% / **100%** THINK recall /
+90.8% / 778ms.
+
+`phi4-mini` and `qwen3.5:2b` collapse exactly like the old `qwen3:4b` did
+(≈40% THINK recall) — a newer generation doesn't rescue a model that's
+simply too small for this specific meta-judgment; the capability
+threshold theory from v1-v3 holds. `ministral-3:3b` clears chit-chat/tools
+fine but misses too many THINK cases (logic 75%, word-problem-trap 67%) to
+qualify. `qwen3.5:9b` confirms the accuracy ceiling is above 94.4% (99.1%,
+only 1 miss) but doesn't fit in 6GB VRAM — slower than the baseline it was
+meant to beat, so not a viable router regardless of accuracy.
+
+**`qwen3.5:4b` is the standout**: higher majority accuracy than `qwen3:8b`
+(96.3% vs 94.4%) at 42% of the latency (450ms vs 778ms). It does not
+match `qwen3:8b`'s 100% THINK recall — it misses exactly one case, "¿Cuántos
+meses del año tienen 28 días?", the same borderline item `qwen3:8b` also
+gets wrong in this exact metric (the honest answer, "all of them have at
+least 28," makes NO_THINK a defensible read too). With only 42 THINK cases
+in the dataset, one miss is already 97.6% — "100% vs. 97.6%" here means
+"zero misses vs. one shared, arguably-ambiguous miss," not a reliability
+gap.
+
+## Conclusion (evolving — under active investigation as of the last edit)
+
+**`qwen3.5:4b` is the current best candidate**, ahead of every model
+tested so far on the accuracy/latency trade-off, though not a clean sweep
+on the strict "THINK recall first" rule this investigation adopted (see
+above). No verdict has been locked in — a further round (IBM Granite 4.2
+8B/3B, Cogito 8B, Gemma 3 4B, and an unverified "NeoHorse-1-9B") was
+proposed and is pending as of this save; existence in the Ollama registry
+has not yet been checked for any of them.
+
+**Not yet acted on:** wiring a router into `app/bot.py`/`app/llm.py` (was
+Paso 3 of the original plan) — deliberately not started while the model
+choice is still moving. GLiClass/torch (v3) were installed only inside
+the running container for that test, never added to the
+Dockerfile/requirements — nothing to roll back.
 
 ## Open questions for next session
 
-- Implement the wiring above (was Paso 3 of the original plan).
-- Optional, not required to close this: a confidence-gated cascade
-  (skip the router call outright on lexically obvious cases) or the
-  BGE-M3 + logistic-regression head once real labeled traffic exists —
-  both deferred, no model available today makes them necessary.
+- Resolve the model search: either run the pending round (Granite
+  4.2 8B/3B, Cogito 8B, Gemma 3 4B; confirm "NeoHorse-1-9B" actually
+  exists before spending a download on it) or deliberately stop here and
+  commit to `qwen3.5:4b`. This has gone through four rounds already —
+  worth deciding *when to stop searching*, not just what to search next.
+- Once a model is chosen, implement the wiring (Paso 3).
+- A live idea from this round, independent of which model wins: instead
+  of one router, a small Pareto-tiered cascade (e.g. a cheap/fast model
+  handles the obvious cases, escalating only the uncertain ones to a
+  slower/more accurate one) — worth real consideration if the final
+  numbers show a genuine accuracy/latency frontier rather than one
+  dominant model.
+- Deferred, not required to close this: a confidence-gated cascade using
+  logprobs, or a BGE-M3 + logistic-regression head once real labeled
+  traffic exists.
 - `evals/results/` is gitignored — this file documents the finding
   independent of the raw JSON surviving on this machine.
