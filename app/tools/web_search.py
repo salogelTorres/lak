@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-import html
 import logging
 import re
 
 import httpx
 
+from app.tools._html import HEADERS, REDACTED, looks_like_injection, normalize_url, strip_markup
 from app.tools.base import Tool
 
 logger = logging.getLogger(__name__)
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 MAX_RESULTS = 5
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
 
 # One pattern per result: the URL comes from the *same* anchor as the title,
 # and the snippet is looked up within the chunk running up to the next
@@ -29,35 +22,10 @@ _RESULT_RE = re.compile(
     r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>(.*?)(?=class="result__a"|\Z)', re.DOTALL
 )
 _SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)>', re.DOTALL)
-_TAG_RE = re.compile(r"<[^>]+>")
 # Ads point at DuckDuckGo's own redirector instead of the actual site —
 # drop them, since citing one as a source would misattribute it to
 # DuckDuckGo rather than whoever is actually saying it.
 _AD_MARKER = "duckduckgo.com/y.js"
-
-# A search result is untrusted content that ends up straight in the model's
-# context — redact anything that reads like an attempt to inject
-# instructions rather than answer the query.
-_INJECTION_PATTERNS = (
-    re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior)\s+instructions\b", re.IGNORECASE),
-    re.compile(r"\bdisregard\s+(?:all\s+)?instructions\b", re.IGNORECASE),
-    re.compile(r"\b(?:reveal|show|print)\s+(?:the\s+)?system\s+prompt\b", re.IGNORECASE),
-)
-_REDACTED = "[external content omitted: looked like a prompt-injection attempt]"
-
-
-def _strip_markup(value: str) -> str:
-    return _TAG_RE.sub("", html.unescape(value)).strip()
-
-
-def _normalize_url(value: str) -> str:
-    if value and not value.startswith(("http://", "https://")):
-        return f"https://{value}"
-    return value
-
-
-def _looks_like_injection(text: str) -> bool:
-    return any(pattern.search(text) for pattern in _INJECTION_PATTERNS)
 
 
 def _fetch_search_page(query: str) -> str:
@@ -74,14 +42,14 @@ def _fetch_search_page(query: str) -> str:
 def _extract_results(page: str, max_results: int) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     for href, raw_title, chunk in _RESULT_RE.findall(page):
-        title = _strip_markup(raw_title)
+        title = strip_markup(raw_title)
         if not title or _AD_MARKER in href:
             continue
         snippet_match = _SNIPPET_RE.search(chunk)
-        snippet = _strip_markup(snippet_match.group(1)) if snippet_match else ""
-        if _looks_like_injection(title) or _looks_like_injection(snippet):
-            title, snippet = _REDACTED, ""
-        results.append({"title": title, "href": _normalize_url(_strip_markup(href)), "snippet": snippet})
+        snippet = strip_markup(snippet_match.group(1)) if snippet_match else ""
+        if looks_like_injection(title) or looks_like_injection(snippet):
+            title, snippet = REDACTED, ""
+        results.append({"title": title, "href": normalize_url(strip_markup(href)), "snippet": snippet})
         if len(results) == max_results:
             break
     return results

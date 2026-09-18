@@ -117,7 +117,15 @@ required.
   `web_search.py` hits DuckDuckGo's HTML endpoint directly (no API key, no
   extra dependency) and redacts anything in a result that looks like a
   prompt-injection attempt before it ever reaches the model — a search
-  result is untrusted content.
+  result is untrusted content. `fetch_page.py` complements it for deeper
+  research: the model can fetch a specific URL (typically one `search_web`
+  just returned) and read its full text instead of a snippet, truncated to
+  `MAX_CHARS` so one page can't dominate the context budget. Both tools
+  share the same markup-stripping/URL-normalizing/injection-detection logic
+  via `tools/_html.py` rather than duplicating it — keep any new
+  HTML-scraping tool on that shared module too, since letting the
+  injection-redaction rules drift apart per tool is exactly the kind of
+  thing that's easy to miss.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or

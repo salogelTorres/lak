@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from app.tools.base import Tool
+from app.tools.fetch_page import TOOL as _fetch_page
 from app.tools.web_search import TOOL as _web_search
 
 # The catalog of every tool this template ships with. An agent doesn't get
 # any of these by default — it opts in per tool via ENABLED_TOOLS in .env,
 # resolved through resolve_tools() below. Add new tools here.
-AVAILABLE_TOOLS: dict[str, Tool] = {tool.name: tool for tool in (_web_search,)}
+AVAILABLE_TOOLS: dict[str, Tool] = {tool.name: tool for tool in (_web_search, _fetch_page)}
 
 
 def resolve_tools(names: list[str]) -> list[Tool]:

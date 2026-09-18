@@ -59,6 +59,7 @@ LLM_BACKEND_ALIASES = {
 # Keep in sync with app/tools/__init__.py's AVAILABLE_TOOLS catalog.
 AVAILABLE_TOOLS = {
     "search_web": "DuckDuckGo web search, no API key needed",
+    "fetch_page": "Fetch a specific web page and read its full text (deeper research alongside search_web)",
 }
 
 PROMPTS = {

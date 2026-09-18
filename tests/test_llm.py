@@ -269,14 +269,15 @@ async def test_run_with_tools_gives_up_after_max_rounds(patch_async_client_seque
     keeps_calling_tools = FakeResponse(
         {"message": {"content": None, "tool_calls": [make_tool_call("c", "greet", '{"name": "Luis"}')]}}
     )
-    calls = patch_async_client_sequence(llm_module.httpx, [keeps_calling_tools] * 4)
+    rounds = llm_module.MAX_TOOL_ROUNDS + 1
+    calls = patch_async_client_sequence(llm_module.httpx, [keeps_calling_tools] * rounds)
     tool = make_greet_tool()
     client = OllamaClient("http://ollama:11434", "llama3")
 
     result = await client.chat([{"role": "user", "content": "hi"}], tools=[tool])
 
     assert "couldn't get to an answer" in result
-    assert len(calls) == 4  # MAX_TOOL_ROUNDS + 1, the last one offered no tools
+    assert len(calls) == rounds  # MAX_TOOL_ROUNDS + 1, the last one offered no tools
     assert "tools" not in calls[-1][1]["json"]
 
 

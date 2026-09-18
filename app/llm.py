@@ -21,8 +21,9 @@ ToolCall = dict[str, Any]
 
 # Bounded so a model that keeps requesting tools indefinitely can't loop
 # forever — one final round always runs with tools withheld, forcing a
-# plain-text answer.
-MAX_TOOL_ROUNDS = 3
+# plain-text answer. High enough that a search-then-read-a-few-pages research
+# chain (search_web, then a couple of fetch_page calls) can actually finish.
+MAX_TOOL_ROUNDS = 6
 
 
 class LLMClient(Protocol):

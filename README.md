@@ -12,7 +12,8 @@ OpenRouter, proxies, etc.), running in Docker.
   per-chat conversation history and an optional user whitelist
   (`ALLOWED_USER_IDS`).
 - **Tools**: `app/tools/` catalogs capabilities an agent can call mid-conversation
-  (currently `search_web`, DuckDuckGo, no API key). None are enabled by
+  (currently `search_web`, DuckDuckGo, no API key; and `fetch_page`, reading a
+  specific page's full text for deeper research). None are enabled by
   default — `setup.py` asks which ones to turn on, stored as `ENABLED_TOOLS`
   in `.env`.
 - **Voice messages**: Telegram voice notes (and audio files) are transcribed
@@ -137,7 +138,9 @@ OpenRouter, proxies, etc.), running in Docker.
   tool the template adds, without touching ones you've already enabled.
   Requires a model that supports tool/function calling (qwen3:8b and most
   cloud models do); if the model just ignores a tool, check that first.
-  Currently available: `search_web` (DuckDuckGo, no API key).
+  Currently available: `search_web` (DuckDuckGo, no API key) and
+  `fetch_page` (reads a specific page's full text — use it alongside
+  `search_web` when a snippet isn't enough).
 - **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
   `medium`/`large-v3`) trades off speed for accuracy — `small` is a
   reasonable default on CPU. Every transcription is prefixed with
