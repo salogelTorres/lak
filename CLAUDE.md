@@ -145,12 +145,24 @@ required.
   backed by the `memory_data` volume in `docker-compose.yml`, so notes
   survive restarts unlike the in-memory conversation history. `remind_me`
   doesn't deliver anything itself — it validates the request and hands off
-  to `context.schedule_reminder`, which `bot.py` implements with a plain
-  `asyncio.create_task` + `asyncio.sleep` (stored on `application.bot_data`
-  for the same GC-safety reason as the warm-up task below) rather than a
-  real job queue; like conversation history, a pending reminder is lost if
-  the bot restarts before it fires — acceptable for this template, but
-  worth knowing.
+  to `context.schedule_reminder`, which `bot.py` implements with
+  `asyncio.sleep` inside a coroutine scheduled via
+  `asyncio.run_coroutine_threadsafe()` onto the main loop captured (via
+  `asyncio.get_running_loop()`) when `_make_tool_context()` builds the
+  context — **not** a bare `asyncio.create_task()`: every tool, regardless
+  of `needs_context`, runs through `asyncio.to_thread()` (see
+  `app.llm._call_tool`), so `schedule_reminder()` always executes on a
+  worker thread with no event loop of its own, where `create_task()` raises
+  `RuntimeError: no running event loop` (this shipped broken — it only
+  surfaced against a real Telegram conversation, since tests exercised
+  `schedule_reminder()` from the main thread directly). The returned
+  `Future` gets the same GC-safety treatment as the warm-up task below
+  (held in `application.bot_data` until an `add_done_callback()` — not
+  code inside the coroutine closing over the `Future` variable, which
+  would race the cross-thread scheduling — removes it once done). No real
+  job queue here either way: like conversation history, a pending reminder
+  is lost if the bot restarts before it fires — acceptable for this
+  template, but worth knowing.
 
   `think_harder.py` is a different kind of context-dependent tool: instead
   of `chat_id`, it needs `context.think_harder` — a callback owned by

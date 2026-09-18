@@ -349,7 +349,7 @@ def make_fake_application():
     return application
 
 
-def test_make_tool_context_returns_context_with_given_chat_id():
+async def test_make_tool_context_returns_context_with_given_chat_id():
     app = make_fake_application()
 
     context = _make_tool_context(app, 42)
@@ -357,44 +357,50 @@ def test_make_tool_context_returns_context_with_given_chat_id():
     assert context.chat_id == 42
 
 
-async def test_schedule_reminder_sends_message_after_delay(monkeypatch):
+async def test_schedule_reminder_sends_message_after_delay():
     app = make_fake_application()
-    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
-
     context = _make_tool_context(app, 42)
-    context.schedule_reminder(300, "Call mom")
+
+    # A real (if tiny) delay rather than a mocked-instant asyncio.sleep:
+    # with cleanup now happening via add_done_callback (see the race that
+    # motivated it, below), a zero-time sleep could let _fire() finish and
+    # remove itself before this test even gets to look at reminder_tasks.
+    # Mirrors the real call path too: every tool, needs_context or not,
+    # runs via asyncio.to_thread (see app.llm._call_tool) — a worker thread
+    # with no event loop of its own. Calling schedule_reminder() straight
+    # from this coroutine would miss the bug this covers (asyncio.create_task
+    # requires a loop running in the *current* thread).
+    await asyncio.to_thread(context.schedule_reminder, 0.05, "Call mom")
     task = next(iter(app.bot_data["reminder_tasks"]))
-    await task
+    await asyncio.wrap_future(task)
 
     app.bot.send_message.assert_awaited_once_with(42, "⏰ Reminder: Call mom")
 
 
-async def test_schedule_reminder_task_removes_itself_once_done(monkeypatch):
+async def test_schedule_reminder_task_removes_itself_once_done():
     # Regression test for the same asyncio gotcha as the warm-up task: the
     # task must be stored somewhere (bot_data) while pending, and cleaned up
     # afterward instead of leaking forever in that set.
     app = make_fake_application()
-    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
-
     context = _make_tool_context(app, 42)
-    context.schedule_reminder(300, "Call mom")
+
+    await asyncio.to_thread(context.schedule_reminder, 0.05, "Call mom")
     task = next(iter(app.bot_data["reminder_tasks"]))
-    await task
+    await asyncio.wrap_future(task)
 
     assert app.bot_data["reminder_tasks"] == set()
 
 
-async def test_schedule_reminder_logs_instead_of_raising_on_send_failure(monkeypatch, caplog):
+async def test_schedule_reminder_logs_instead_of_raising_on_send_failure(caplog):
     app = make_fake_application()
     app.bot.send_message = AsyncMock(side_effect=RuntimeError("network down"))
-    monkeypatch.setattr("app.bot.asyncio.sleep", AsyncMock())
-
     context = _make_tool_context(app, 42)
-    context.schedule_reminder(300, "Call mom")
+
+    await asyncio.to_thread(context.schedule_reminder, 0.05, "Call mom")
     task = next(iter(app.bot_data["reminder_tasks"]))
 
     with caplog.at_level(logging.ERROR, logger="app.bot"):
-        await task  # must not raise
+        await asyncio.wrap_future(task)  # must not raise
 
     assert "failed sending reminder" in caplog.text.lower()
 

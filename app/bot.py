@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import io
 import logging
@@ -257,7 +258,11 @@ def _make_tool_context(application: Application, chat_id: int) -> ToolContext:
     app.tools.base.ToolContext. Kept out of _reply_to itself since it needs
     nothing from that closure besides `application` and `chat_id`.
     """
-    reminder_tasks: set[asyncio.Task] = application.bot_data.setdefault("reminder_tasks", set())
+    reminder_tasks: set[concurrent.futures.Future] = application.bot_data.setdefault("reminder_tasks", set())
+    # _make_tool_context() itself always runs on the main loop (called
+    # directly from _reply_to, never via asyncio.to_thread), so this is the
+    # right loop to hand reminders back to below.
+    loop = asyncio.get_running_loop()
 
     def schedule_reminder(delay_seconds: float, message: str) -> None:
         async def _fire() -> None:
@@ -266,14 +271,24 @@ def _make_tool_context(application: Application, chat_id: int) -> ToolContext:
                 await application.bot.send_message(chat_id, f"⏰ Reminder: {message}")
             except Exception:
                 logger.exception("Failed sending reminder")
-            finally:
-                reminder_tasks.discard(task)
 
-        # Same gotcha as _warm_up_ollama's task below: asyncio only holds a
-        # *weak* reference to a bare create_task() result, so without
-        # storing it somewhere it can be garbage-collected mid-sleep.
-        task = asyncio.create_task(_fire())
+        # schedule_reminder() runs wherever the tool it backs runs — and
+        # _call_tool() runs *every* tool via asyncio.to_thread, needs_context
+        # or not, so this is always called from a worker thread with no
+        # event loop of its own. asyncio.create_task() would raise
+        # "no running event loop" there; run_coroutine_threadsafe() hands
+        # the coroutine to the *main* loop captured above instead. The
+        # returned Future needs the same strong-reference treatment as a
+        # bare create_task() result (see _warm_up_ollama below) so it can't
+        # be garbage-collected mid-sleep — held in reminder_tasks until
+        # add_done_callback() removes it. Cleanup is a callback on the
+        # Future rather than code inside _fire() referencing `task` by
+        # closure: run_coroutine_threadsafe() schedules _fire() on another
+        # thread, which could in principle start running before this
+        # function returns and binds `task`, racing the closure.
+        task = asyncio.run_coroutine_threadsafe(_fire(), loop)
         reminder_tasks.add(task)
+        task.add_done_callback(reminder_tasks.discard)
 
     return ToolContext(chat_id=chat_id, schedule_reminder=schedule_reminder)
 
