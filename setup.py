@@ -13,6 +13,7 @@ Ollama model automatically when that's the chosen backend).
 """
 from __future__ import annotations
 
+import platform
 import re
 import shutil
 import subprocess
@@ -132,6 +133,86 @@ def ensure_gpu_override() -> bool:
     return True
 
 
+def docker_is_running() -> bool:
+    result = subprocess.run(
+        ["docker", "info"], capture_output=True, check=False,
+    )
+    return result.returncode == 0
+
+
+def _start_docker_daemon() -> bool:
+    """Best-effort attempt to launch the Docker daemon/Desktop app for the
+    current OS. Returns whether a launch was attempted (not whether it
+    succeeded — caller polls docker_is_running() for that).
+    """
+    system = platform.system()
+
+    if system == "Windows":
+        for candidate in (
+            Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe"),
+            Path.home() / r"AppData\Local\Programs\Docker\Docker\Docker Desktop.exe",
+        ):
+            if candidate.exists():
+                subprocess.Popen([str(candidate)], close_fds=True)
+                return True
+        return False
+
+    if system == "Darwin":
+        if shutil.which("open") is None:
+            return False
+        subprocess.run(["open", "-a", "Docker"], check=False)
+        return True
+
+    if system == "Linux":
+        if shutil.which("systemctl") is not None:
+            result = subprocess.run(
+                ["systemctl", "start", "docker"], capture_output=True, check=False
+            )
+            if result.returncode == 0:
+                return True
+        if shutil.which("service") is not None:
+            result = subprocess.run(
+                ["service", "docker", "start"], capture_output=True, check=False
+            )
+            return result.returncode == 0
+        return False
+
+    return False
+
+
+def ensure_docker_running(*, timeout_seconds: int = 90, poll_seconds: float = 3) -> bool:
+    """Make sure the Docker daemon is up before `docker compose` is invoked.
+
+    Docker Desktop/daemon startup can take anywhere from a few seconds to
+    over a minute, so this launches it (if not already running) and polls
+    until it responds or `timeout_seconds` elapses.
+    """
+    if docker_is_running():
+        return True
+
+    print("Docker is not running — attempting to start it...")
+    if not _start_docker_daemon():
+        print(
+            "Could not start Docker automatically. Start Docker Desktop (or the "
+            "docker service) yourself and re-run this command."
+        )
+        return False
+
+    waited = 0.0
+    while waited < timeout_seconds:
+        time.sleep(poll_seconds)
+        waited += poll_seconds
+        if docker_is_running():
+            print("Docker is up.")
+            return True
+
+    print(
+        f"Docker did not become ready within {timeout_seconds}s. "
+        "Once it's up, run `docker compose up -d --build` yourself."
+    )
+    return False
+
+
 def pull_ollama_model(model: str, *, retries: int = 10, delay_seconds: float = 3) -> bool:
     """Download `model` into the ollama service's volume.
 
@@ -195,6 +276,8 @@ def main() -> None:
 
     launch = input("\nStart the agent now with docker compose? (Y/n): ").strip().lower()
     if launch in ("", "y"):
+        if not ensure_docker_running():
+            return
         subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=ROOT, check=False)
         if values["LLM_BACKEND"] == "ollama":
             pull_ollama_model(values["OLLAMA_MODEL"])

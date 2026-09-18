@@ -98,6 +98,9 @@ def main() -> int:
     if setup.ensure_gpu_override():
         print("NVIDIA GPU detected — enabling GPU acceleration for Ollama.")
 
+    if not setup.ensure_docker_running():
+        return 1
+
     print("\nRebuilding with docker compose up -d --build...")
     run(["docker", "compose", "up", "-d", "--build"], check=False)
     print("\nDone. Check logs with: docker compose logs -f")
