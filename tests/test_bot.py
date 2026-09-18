@@ -322,7 +322,7 @@ async def test_handle_message_relays_tool_call_notifications_to_telegram():
 
     async def fake_chat(messages, tools=None, context=None, on_tool_call=None):
         if on_tool_call:
-            await on_tool_call("search_web")
+            await on_tool_call("search_web", {"query": "Billy the bot"})
         return "the answer"
 
     llm_client.chat = AsyncMock(side_effect=fake_chat)
@@ -332,7 +332,7 @@ async def test_handle_message_relays_tool_call_notifications_to_telegram():
 
     await handle_message(update, make_context())
 
-    update.message.reply_text.assert_any_call(TOOL_CALL_LABELS["search_web"])
+    update.message.reply_text.assert_any_call(TOOL_CALL_LABELS["search_web"]({"query": "Billy the bot"}))
     update.message.reply_text.assert_any_call("the answer")
 
 
@@ -397,22 +397,54 @@ async def test_schedule_reminder_logs_instead_of_raising_on_send_failure(monkeyp
     assert "failed sending reminder" in caplog.text.lower()
 
 
-async def test_on_tool_call_sends_friendly_label_for_known_tool():
+async def test_on_tool_call_includes_the_argument_in_the_label():
     update = make_update()
     on_tool_call = _make_on_tool_call(update)
 
-    await on_tool_call("search_web")
+    await on_tool_call("search_web", {"query": "billy bot"})
 
-    update.message.reply_text.assert_awaited_once_with(TOOL_CALL_LABELS["search_web"])
+    update.message.reply_text.assert_awaited_once_with("🔍 Searching the web for: billy bot")
+
+
+async def test_on_tool_call_falls_back_to_plain_label_when_argument_is_missing():
+    update = make_update()
+    on_tool_call = _make_on_tool_call(update)
+
+    await on_tool_call("search_web", {})
+
+    update.message.reply_text.assert_awaited_once_with("🔍 Searching the web...")
+
+
+async def test_on_tool_call_truncates_a_long_argument():
+    update = make_update()
+    on_tool_call = _make_on_tool_call(update)
+
+    await on_tool_call("fetch_page", {"url": "https://example.com/" + "x" * 300})
+
+    sent = update.message.reply_text.await_args.args[0]
+    assert len(sent) < 300
+    assert sent.endswith("…")
 
 
 async def test_on_tool_call_falls_back_to_generic_label_for_unknown_tool():
     update = make_update()
     on_tool_call = _make_on_tool_call(update)
 
-    await on_tool_call("some_future_tool")
+    await on_tool_call("some_future_tool", {})
 
     update.message.reply_text.assert_awaited_once_with("🔧 Using some_future_tool...")
+
+
+async def test_on_tool_call_recovers_from_a_formatter_that_raises():
+    update = make_update()
+    on_tool_call = _make_on_tool_call(update)
+
+    # remind_me's formatter does `args["minutes"]:g`, which raises for a
+    # non-numeric value — a model sending an odd type must not take the
+    # whole reply down with it.
+    await on_tool_call("remind_me", {"minutes": "soon", "message": "hi"})
+
+    update.message.reply_text.assert_awaited_once_with("🔧 Using remind_me...")
 
 
 async def test_handle_message_denies_disallowed_user():

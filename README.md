@@ -140,9 +140,10 @@ OpenRouter, proxies, etc.), running in Docker.
   tool the template adds, without touching ones you've already enabled.
   Requires a model that supports tool/function calling (qwen3:8b and most
   cloud models do); if the model just ignores a tool, check that first.
-  Whenever a tool actually runs, the chat gets a short heads-up first (e.g.
-  "🔍 Searching the web...") so a multi-second call doesn't look like the
-  bot has stalled. Currently available: `search_web` (DuckDuckGo, no API
+  Whenever a tool actually runs, the chat gets a short heads-up first,
+  including what it's doing (e.g. "🔍 Searching the web for: latest AI
+  news") so a multi-second call doesn't look like the bot has stalled.
+  Currently available: `search_web` (DuckDuckGo, no API
   key), `fetch_page` (reads a specific page's full text — use it alongside
   `search_web` when a snippet isn't enough), `remember`/`recall` (persistent
   per-chat notes that survive restarts), `get_weather` (Open-Meteo, no API

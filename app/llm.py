@@ -27,10 +27,11 @@ ToolCall = dict[str, Any]
 MAX_TOOL_ROUNDS = 6
 
 
-# Notified with a tool's name right before it runs, so the caller can let
-# the user know something's happening (a tool call can take a few seconds —
-# a web request, a file write — while the chat otherwise looks stalled).
-OnToolCall = Callable[[str], Awaitable[None]]
+# Notified with a tool's name and parsed arguments right before it runs, so
+# the caller can let the user know something's happening — and *what*, e.g.
+# the query being searched — since a tool call can take a few seconds (a
+# web request, a file write) while the chat otherwise looks stalled.
+OnToolCall = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class LLMClient(Protocol):
@@ -94,7 +95,8 @@ async def _run_with_tools(
         conversation.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
         for call in calls:
             if on_tool_call:
-                await on_tool_call(call.get("function", {}).get("name", ""))
+                function = call.get("function", {})
+                await on_tool_call(function.get("name", ""), _parse_arguments(function))
             conversation.append(await _call_tool(tools_by_name, call, round_context))
 
     return "I tried using some tools but couldn't get to an answer. Could you rephrase?"
@@ -120,6 +122,19 @@ def _with_think_harder(
     return dataclasses.replace(context, think_harder=think_harder)
 
 
+def _parse_arguments(function: dict[str, Any]) -> dict[str, Any]:
+    # Ollama's /api/chat hands back tool_calls[].function.arguments already
+    # parsed into a dict; OpenAI-compatible /chat/completions sends it as a
+    # JSON string. Handle both instead of assuming the OpenAI shape.
+    raw_arguments = function.get("arguments") or {}
+    if not isinstance(raw_arguments, str):
+        return raw_arguments
+    try:
+        return json.loads(raw_arguments or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
 async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall, context: ToolContext | None = None) -> Message:
     function: dict[str, Any] = call.get("function", {})
     name: str = function.get("name", "")
@@ -128,17 +143,7 @@ async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall, context: To
     if tool is None:
         return {"role": "tool", "tool_call_id": call_id, "content": f"Unknown tool: {name}"}
 
-    # Ollama's /api/chat hands back tool_calls[].function.arguments already
-    # parsed into a dict; OpenAI-compatible /chat/completions sends it as a
-    # JSON string. Handle both instead of assuming the OpenAI shape.
-    raw_arguments = function.get("arguments") or {}
-    if isinstance(raw_arguments, str):
-        try:
-            arguments: dict[str, Any] = json.loads(raw_arguments or "{}")
-        except json.JSONDecodeError:
-            arguments = {}
-    else:
-        arguments = raw_arguments
+    arguments = _parse_arguments(function)
 
     try:
         if tool.needs_context:

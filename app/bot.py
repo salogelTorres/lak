@@ -5,6 +5,7 @@ import contextlib
 import io
 import logging
 from datetime import datetime
+from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from faster_whisper import WhisperModel
@@ -43,18 +44,45 @@ COMPACTION_SYSTEM_PROMPT = (
 
 WHISPER_DOWNLOAD_ROOT = "/data/whisper"
 
+# Kept short so a long note/query/URL doesn't turn the heads-up itself into
+# a wall of text in the chat.
+_ARG_PREVIEW_LIMIT = 200
+
+
+def _preview(value: Any) -> str:
+    text = str(value).strip()
+    return text if len(text) <= _ARG_PREVIEW_LIMIT else f"{text[:_ARG_PREVIEW_LIMIT]}…"
+
+
 # Sent to the chat right before a tool actually runs, so a call that takes a
 # few seconds (a web request, a file write) doesn't look like the bot has
-# stalled. Falls back to the raw tool name for any tool without an entry
-# here, so a new tool works without needing to touch this dict first.
-TOOL_CALL_LABELS = {
-    "search_web": "🔍 Searching the web...",
-    "fetch_page": "📖 Reading a page...",
-    "remember": "💾 Saving that to memory...",
-    "recall": "🧠 Checking my memory...",
-    "get_weather": "🌤️ Checking the weather...",
-    "remind_me": "⏰ Setting a reminder...",
-    "think_harder": "🤔 Thinking it through...",
+# stalled — and *what* it's doing (the query, the URL, ...), not just that
+# it's doing something. Each formatter takes the tool's parsed arguments and
+# falls back to a plain label if the argument it wants isn't there. A tool
+# with no entry here still gets a generic "Using {name}..." message rather
+# than silence, so a new tool works without needing to touch this dict first.
+TOOL_CALL_LABELS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "search_web": lambda args: (
+        f"🔍 Searching the web for: {_preview(args['query'])}" if args.get("query") else "🔍 Searching the web..."
+    ),
+    "fetch_page": lambda args: (
+        f"📖 Reading page: {_preview(args['url'])}" if args.get("url") else "📖 Reading a page..."
+    ),
+    "remember": lambda args: (
+        f"💾 Saving to memory: {_preview(args['note'])}" if args.get("note") else "💾 Saving that to memory..."
+    ),
+    "recall": lambda args: "🧠 Checking my memory...",
+    "get_weather": lambda args: (
+        f"🌤️ Checking the weather in {_preview(args['location'])}..."
+        if args.get("location")
+        else "🌤️ Checking the weather..."
+    ),
+    "remind_me": lambda args: (
+        f"⏰ Setting a reminder in {args['minutes']:g} min: {_preview(args['message'])}"
+        if args.get("minutes") and args.get("message")
+        else "⏰ Setting a reminder..."
+    ),
+    "think_harder": lambda args: "🤔 Thinking it through...",
 }
 
 _whisper_models: dict[str, WhisperModel] = {}
@@ -250,8 +278,19 @@ def _make_tool_context(application: Application, chat_id: int) -> ToolContext:
 
 
 def _make_on_tool_call(update: Update):
-    async def on_tool_call(name: str) -> None:
-        await update.message.reply_text(TOOL_CALL_LABELS.get(name, f"🔧 Using {name}..."))
+    async def on_tool_call(name: str, arguments: dict[str, Any]) -> None:
+        formatter = TOOL_CALL_LABELS.get(name)
+        try:
+            label = formatter(arguments) if formatter else f"🔧 Using {name}..."
+        except Exception:
+            # A formatter expects specific argument shapes; a model that
+            # sends something unexpected (wrong type, missing key some
+            # other way) must never take the whole reply down with it —
+            # same "one broken tool can't break the conversation"
+            # philosophy as the rest of the tool-calling machinery.
+            logger.exception("Failed formatting tool-call label for %r", name)
+            label = f"🔧 Using {name}..."
+        await update.message.reply_text(label)
 
     return on_tool_call
 

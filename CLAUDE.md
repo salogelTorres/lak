@@ -172,8 +172,16 @@ required.
   Every tool call is also announced to the chat right before it runs
   (`bot.py`'s `_make_on_tool_call()`, threaded into `_run_with_tools()` as
   `on_tool_call`) via `TOOL_CALL_LABELS`, so a call that takes a few seconds
-  doesn't look like the bot has stalled — a tool with no entry there still
-  gets a generic `"🔧 Using {name}..."` message rather than silence.
+  doesn't look like the bot has stalled. `_run_with_tools()` parses each
+  call's arguments once (`_parse_arguments()`, shared with `_call_tool()`
+  so the Ollama-dict-vs-OpenAI-string handling doesn't drift between the
+  two) and hands them to `on_tool_call`, so `TOOL_CALL_LABELS`' formatters
+  can say *what* it's doing — the query, the URL, the note — not just that
+  it's doing something. Each formatter falls back to a plain label if its
+  argument is missing, and `_make_on_tool_call()` catches any exception a
+  formatter raises (a model sending an odd argument type must not take the
+  whole reply down with it); a tool with no entry there still gets a
+  generic `"🔧 Using {name}..."` message rather than silence.
 - `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or

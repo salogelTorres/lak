@@ -362,13 +362,13 @@ async def test_ollama_client_notifies_on_tool_call_before_running_it(patch_async
     client = OllamaClient("http://ollama:11434", "llama3")
     notified = []
 
-    async def on_tool_call(name: str) -> None:
-        notified.append(name)
+    async def on_tool_call(name: str, arguments: dict) -> None:
+        notified.append((name, arguments))
 
     result = await client.chat([{"role": "user", "content": "greet Luis"}], tools=[tool], on_tool_call=on_tool_call)
 
     assert result == "Hello, Luis!"
-    assert notified == ["greet"]
+    assert notified == [("greet", {"name": "Luis"})]
 
 
 def test_with_think_harder_returns_none_when_context_is_none():
