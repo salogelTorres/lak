@@ -218,8 +218,17 @@ required.
   has no event loop of its own to conflict with. This self-invoked path is
   what `router.py`'s `OllamaRouter` above exists to route around — an agent
   with `ROUTER_MODEL` set doesn't need the model to reach for this tool at
-  all, since `bot.py` decides `think` up front instead. `think_harder` stays
-  in the catalog either way (harmless, if redundant, alongside a router).
+  all, since `bot.py` decides `think` up front instead. Letting the model
+  self-invoke it *on top of* that turned out not to be harmless: it stacks
+  a second full reasoning round onto a reply that's already thinking, and
+  since the tool-call announcement reuses the exact same "🤔 Thinking it
+  through..." text as the router's own notice, the user just sees a
+  duplicate message with no clue an extra, redundant LLM call is what
+  actually happened in between — this shipped and was caught live against
+  Billy. `bot.py`'s `_reply_to()` fixes this by excluding `think_harder`
+  from the tools offered to the model whenever `think` is already `True`
+  for that turn; a router-less agent (or one where the router said
+  `NO_THINK`) still gets it offered normally.
 
   Every tool call is also announced to the chat right before it runs
   (`bot.py`'s `_make_on_tool_call()`, threaded into `_run_with_tools()` as

@@ -378,6 +378,14 @@ def build_application(config: Config, llm_client: LLMClient, router: OllamaRoute
                 await update.message.reply_text(TOOL_CALL_LABELS["think_harder"]({}))
 
             tools = resolve_tools(config.enabled_tools)
+            if think:
+                # The router already turned on extended reasoning for this
+                # turn — offering think_harder too would let the model
+                # redundantly self-invoke it on top of that (a second full
+                # reasoning round, announced with the exact same notice
+                # text above, so it would look like a stuck duplicate
+                # rather than what it actually is: wasted latency).
+                tools = [tool for tool in tools if tool.name != "think_harder"]
             try:
                 if tools:
                     tool_context = _make_tool_context(context.application, chat_id)

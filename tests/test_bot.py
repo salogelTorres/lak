@@ -384,6 +384,42 @@ async def test_handle_message_with_router_and_tools_passes_think_through():
     assert kwargs["tools"] == [SEARCH_WEB_TOOL]
 
 
+async def test_handle_message_with_router_think_excludes_think_harder_tool():
+    # The router already turns on extended reasoning for this turn — the
+    # model must not also be offered think_harder, or it can redundantly
+    # self-invoke it on top of that (a second full reasoning round,
+    # announced with the exact same notice text sent for the router).
+    from app.tools.web_search import TOOL as SEARCH_WEB_TOOL
+
+    config = make_config(enabled_tools=["search_web", "think_harder"])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    router = AsyncMock()
+    router.classify.return_value = True
+    app = build_application(config, llm_client, router=router)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(text="a tricky riddle"), make_context())
+
+    assert llm_client.chat.call_args.kwargs["tools"] == [SEARCH_WEB_TOOL]
+
+
+async def test_handle_message_without_think_still_offers_think_harder_tool():
+    from app.tools.think_harder import TOOL as THINK_HARDER_TOOL
+
+    config = make_config(enabled_tools=["think_harder"])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    router = AsyncMock()
+    router.classify.return_value = False
+    app = build_application(config, llm_client, router=router)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(text="hola"), make_context())
+
+    assert llm_client.chat.call_args.kwargs["tools"] == [THINK_HARDER_TOOL]
+
+
 async def test_handle_message_relays_tool_call_notifications_to_telegram():
     config = make_config(enabled_tools=["search_web"])
     llm_client = AsyncMock()
