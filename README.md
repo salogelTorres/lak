@@ -152,7 +152,10 @@ OpenRouter, proxies, etc.), running in Docker.
   history), and `think_harder` (re-answers the current question with
   extended reasoning turned on — only has a real effect with
   `LLM_BACKEND=ollama` and a model that supports it, like qwen3; on other
-  backends/models it just re-asks plainly).
+  backends/models it just re-asks plainly). In practice `think_harder`
+  rarely self-invokes even when a message clearly needs it — see
+  `ROUTER_MODEL` below for a more reliable way to turn on extended
+  reasoning.
 - **Voice messages**: `WHISPER_MODEL` in `.env` (`tiny`/`base`/`small`/
   `medium`/`large-v3`) trades off speed for accuracy — `small` is a
   reasonable default on CPU. Every transcription is prefixed with
@@ -175,6 +178,22 @@ OpenRouter, proxies, etc.), running in Docker.
   if you're on a small local context window, raise it if your model/API
   supports a much larger one. History itself is in-memory only and resets
   when the bot restarts.
+
+- **Reasoning router**: `ROUTER_MODEL` in `.env` (Ollama backend only, empty
+  by default). Relying on the model to decide for itself when a message
+  needs extended reasoning — via `think_harder` above — turned out to be
+  unreliable in practice: it stayed silent even on messages explicitly
+  asking it to "think carefully". Setting `ROUTER_MODEL` to an Ollama model
+  name instead runs a small, separate classification call before *every*
+  reply that decides THINK/NO_THINK directly, and turns on `think` mode for
+  that reply if needed — no tool call involved, and the chat gets a
+  "🤔 Thinking it through..." notice when it triggers. It fails open: any
+  error, timeout, or unparseable response just skips the extended reasoning
+  for that message rather than blocking the reply. See
+  [Comparing models as a THINK/NO_THINK router](#comparing-models-as-a-thinkno_think-router)
+  for how to pick a model — for it not to add latency, it generally needs
+  to either be small enough to sit in VRAM alongside your main model, or be
+  the same model as `OLLAMA_MODEL` so nothing extra has to load.
 
 `.env`, `app/prompts/system_prompt.txt`, and `docker-compose.override.yml`
 are all gitignored — see
@@ -260,11 +279,11 @@ docker compose exec bot python -m evals.run
 
 ## Comparing models as a THINK/NO_THINK router
 
-If you're on the `ollama` backend and considering `think_harder` (or
-extended reasoning in general), the question worth answering with data
-first is: *which model reliably decides whether a message needs it?* —
-that decision, not the reasoning itself, is what has to be cheap and fast,
-since it runs before every reply.
+If you're on the `ollama` backend and considering `ROUTER_MODEL` (see
+Customizing above), the question worth answering with data first is:
+*which model reliably decides whether a message needs extended reasoning?*
+— that decision, not the reasoning itself, is what has to be cheap and
+fast, since it runs before every reply.
 
 `bench.py` pulls (if needed) and benchmarks one or more Ollama models as
 that router, against a labeled, multilingual dataset of tricky and

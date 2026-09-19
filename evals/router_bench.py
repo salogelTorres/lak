@@ -12,6 +12,11 @@ THINK cases (quality cost) and false THINK on easy ones (latency cost) —
 consistency across attempts, per-language and per-category accuracy, and
 latency. Raw per-call records go to a JSON file for later analysis.
 
+The prompt, JSON schema, and label parsing are imported from app.router —
+the actual production router, now that evals/ROUTER_FINDINGS.md settled on
+one — so this measures exactly what a real reply would decide, not a
+lookalike copy that could quietly drift from it.
+
 Like evals/run.py this never runs under pytest. It only needs httpx and
 Ollama reachable. From the host, against a Compose-published port:
 
@@ -30,7 +35,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import statistics
 import sys
 import time
@@ -41,53 +45,9 @@ from typing import Any
 
 import httpx
 
+from app.router import ROUTER_SYSTEM_PROMPT, parse_label
+from app.router import _ROUTER_SCHEMA as ROUTER_SCHEMA
 from evals.router_dataset import CASES, NO_THINK, THINK
-
-# Short on purpose — it's re-sent on every call, so its length is most of the
-# prompt-eval cost. Few-shot examples deliberately don't overlap the dataset.
-ROUTER_SYSTEM_PROMPT = (
-    "You are a router in front of an AI assistant. Decide whether answering the user's "
-    "message well requires careful step-by-step reasoning — multi-step math, logic, riddles "
-    "or trick wording, planning under constraints, weighing trade-offs, debugging code — or "
-    "whether it can be answered directly: greetings, simple facts, translations, rewrites, "
-    "single-step arithmetic, or things that just need a tool such as weather, search, "
-    "reminders or memory. The message may be in any language; judge the task, not the words "
-    "used to ask it. Reply with exactly one word, THINK or NO_THINK, and nothing else.\n\n"
-    "Examples:\n"
-    "¿A qué hora abre el supermercado? -> NO_THINK\n"
-    "Translate 'good night' into German. -> NO_THINK\n"
-    "Wie spät ist es? -> NO_THINK\n"
-    "Se una camicia costa 20 € dopo il 20% di sconto, quanto costava prima? -> THINK\n"
-    "I have 3 meetings, 2 overlap, one is with my boss and I can only move one. Which, and why? -> THINK"
-)
-
-_THINK_TAGS_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-# Ollama's structured-output support (a JSON schema passed as `format`)
-# constrains the *next token* at the grammar level, forcing the model to
-# emit the label directly instead of free-text it may or may not follow —
-# smaller models otherwise launch into an open-ended, unstoppable ramble
-# ("Okay, let's see...") even when told to reply with one word only, no
-# matter how many tokens they're given to eventually get there.
-_ROUTER_SCHEMA = {
-    "type": "object",
-    "properties": {"label": {"type": "string", "enum": [THINK, NO_THINK]}},
-    "required": ["label"],
-}
-
-
-def parse_label(raw: str) -> str | None:
-    """Map a model's reply to THINK / NO_THINK, or None if it said neither.
-
-    NO_THINK is checked first because "THINK" is a substring of it.
-    """
-    text = _THINK_TAGS_RE.sub("", raw).strip().upper()
-    text = re.sub(r"[\s\-]+", "_", text)
-    if "NO_THINK" in text or "NOTHINK" in text:
-        return NO_THINK
-    if "THINK" in text:
-        return THINK
-    return None
 
 
 def majority(labels: list[str | None]) -> str | None:
@@ -218,11 +178,11 @@ async def _classify(
             {"role": "user", "content": text},
         ],
         "stream": False,
-        "format": _ROUTER_SCHEMA,
+        "format": ROUTER_SCHEMA,
         # The schema still leaves room for `{"label": "...`, whitespace, and
         # closing punctuation around the enum value — a handful more tokens
         # than the bare word, but nowhere near what an unconstrained model
-        # needs to ramble its way to an answer (see _ROUTER_SCHEMA).
+        # needs to ramble its way to an answer (see ROUTER_SCHEMA).
         "options": {"num_predict": 20},
     }
     if disable_thinking:

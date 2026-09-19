@@ -17,6 +17,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandl
 
 from app.config import Config
 from app.llm import LLMClient
+from app.router import OllamaRouter
 from app.tools import resolve_tools
 from app.tools.base import ToolContext
 
@@ -327,7 +328,7 @@ async def _send_formatted_reply(update: Update, text: str) -> None:
         await update.message.reply_text(text)
 
 
-def build_application(config: Config, llm_client: LLMClient) -> Application:
+def build_application(config: Config, llm_client: LLMClient, router: OllamaRouter | None = None) -> Application:
     # per-chat conversation history and running summary, kept in memory only
     # (reset on restart)
     histories: dict[int, list[dict[str, str]]] = {}
@@ -372,15 +373,23 @@ def build_application(config: Config, llm_client: LLMClient) -> Application:
             # trims oldest messages first, whatever number of them that is
             history = _trim_to_token_budget(history, config.max_history_tokens)
 
+            think = await router.classify(text) if router else False
+            if think:
+                await update.message.reply_text(TOOL_CALL_LABELS["think_harder"]({}))
+
             tools = resolve_tools(config.enabled_tools)
             try:
                 if tools:
                     tool_context = _make_tool_context(context.application, chat_id)
                     reply = await llm_client.chat(
-                        history, tools=tools, context=tool_context, on_tool_call=_make_on_tool_call(update)
+                        history,
+                        tools=tools,
+                        context=tool_context,
+                        on_tool_call=_make_on_tool_call(update),
+                        think=think,
                     )
                 else:
-                    reply = await llm_client.chat(history)
+                    reply = await llm_client.chat(history, think=think)
             except Exception:
                 logger.exception("Failed calling the LLM")
                 await update.message.reply_text("Something went wrong talking to the model. Please try again.")

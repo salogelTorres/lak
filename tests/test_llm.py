@@ -53,6 +53,7 @@ def make_config(**overrides) -> Config:
         max_history_tokens=2000,
         recent_history_tokens=500,
         enabled_tools=[],
+        router_model="",
     )
     defaults.update(overrides)
     return Config(**defaults)

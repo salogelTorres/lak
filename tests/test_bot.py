@@ -70,6 +70,7 @@ def make_config(**overrides) -> Config:
         max_history_tokens=2000,
         recent_history_tokens=500,
         enabled_tools=[],
+        router_model="",
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -136,7 +137,7 @@ def make_recording_llm_client(replies):
     calls: list[list[dict]] = []
     responses = iter(replies)
 
-    def fake_chat(messages):
+    def fake_chat(messages, **kwargs):
         calls.append([dict(m) for m in messages])
         return next(responses)
 
@@ -303,7 +304,7 @@ async def test_handle_message_omits_tools_kwarg_when_none_enabled():
 
     await handle_message(make_update(), make_context())
 
-    assert llm_client.chat.call_args.kwargs == {}
+    assert llm_client.chat.call_args.kwargs == {"think": False}
 
 
 async def test_handle_message_ignores_unknown_tool_names():
@@ -315,14 +316,79 @@ async def test_handle_message_ignores_unknown_tool_names():
 
     await handle_message(make_update(), make_context())
 
-    assert llm_client.chat.call_args.kwargs == {}
+    assert llm_client.chat.call_args.kwargs == {"think": False}
+
+
+async def test_handle_message_without_router_never_calls_classify():
+    config = make_config()
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    app = build_application(config, llm_client, router=None)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(), make_context())
+
+    assert llm_client.chat.call_args.kwargs == {"think": False}
+
+
+async def test_handle_message_with_router_says_think_passes_think_true_and_notifies():
+    config = make_config()
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    router = AsyncMock()
+    router.classify.return_value = True
+    app = build_application(config, llm_client, router=router)
+    _, handle_message = get_handlers(app)
+    update = make_update(text="a tricky riddle")
+
+    await handle_message(update, make_context())
+
+    router.classify.assert_awaited_once_with("a tricky riddle")
+    assert llm_client.chat.call_args.kwargs == {"think": True}
+    update.message.reply_text.assert_any_call(TOOL_CALL_LABELS["think_harder"]({}))
+
+
+async def test_handle_message_with_router_says_no_think_sends_no_notice():
+    config = make_config()
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    router = AsyncMock()
+    router.classify.return_value = False
+    app = build_application(config, llm_client, router=router)
+    _, handle_message = get_handlers(app)
+    update = make_update(text="hola")
+
+    await handle_message(update, make_context())
+
+    assert llm_client.chat.call_args.kwargs == {"think": False}
+    assert TOOL_CALL_LABELS["think_harder"]({}) not in [
+        call.args[0] for call in update.message.reply_text.await_args_list
+    ]
+
+
+async def test_handle_message_with_router_and_tools_passes_think_through():
+    from app.tools.web_search import TOOL as SEARCH_WEB_TOOL
+
+    config = make_config(enabled_tools=["search_web"])
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = "the answer"
+    router = AsyncMock()
+    router.classify.return_value = True
+    app = build_application(config, llm_client, router=router)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(text="a tricky riddle"), make_context())
+
+    kwargs = llm_client.chat.call_args.kwargs
+    assert kwargs["think"] is True
+    assert kwargs["tools"] == [SEARCH_WEB_TOOL]
 
 
 async def test_handle_message_relays_tool_call_notifications_to_telegram():
     config = make_config(enabled_tools=["search_web"])
     llm_client = AsyncMock()
 
-    async def fake_chat(messages, tools=None, context=None, on_tool_call=None):
+    async def fake_chat(messages, tools=None, context=None, on_tool_call=None, think=False):
         if on_tool_call:
             await on_tool_call("search_web", {"query": "Billy the bot"})
         return "the answer"
@@ -522,7 +588,7 @@ async def test_handle_message_sends_typing_action_while_waiting():
     config = make_config()
     llm_client = AsyncMock()
 
-    async def slow_chat(messages):
+    async def slow_chat(messages, **kwargs):
         # a real await point, so the concurrently-scheduled typing task gets
         # a chance to run before this resolves — unlike a mock that returns
         # without ever suspending (which is what a real, slow LLM call never
@@ -544,7 +610,7 @@ async def test_handle_message_stops_typing_action_on_llm_error():
     config = make_config()
     llm_client = AsyncMock()
 
-    async def slow_failing_chat(messages):
+    async def slow_failing_chat(messages, **kwargs):
         await asyncio.sleep(0)
         raise RuntimeError("boom")
 
@@ -759,7 +825,7 @@ async def test_handle_message_compacts_older_history_once_over_budget(monkeypatc
     # recent window tight enough that some of them fall outside it.
     config = make_config(max_history_tokens=15, recent_history_tokens=5)
 
-    def fake_chat(messages):
+    def fake_chat(messages, **kwargs):
         if messages[0]["content"] == COMPACTION_SYSTEM_PROMPT:
             return "Summary: talked about the weather."
         return "reply"
@@ -796,7 +862,7 @@ async def test_handle_message_falls_back_to_trimming_when_compaction_fails(monke
     freeze_now(monkeypatch, fixed)
     config = make_config(max_history_tokens=15, recent_history_tokens=5)
 
-    def fake_chat(messages):
+    def fake_chat(messages, **kwargs):
         if messages[0]["content"] == COMPACTION_SYSTEM_PROMPT:
             raise RuntimeError("boom")
         return "reply"

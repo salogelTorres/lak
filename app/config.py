@@ -42,6 +42,7 @@ class Config:
     max_history_tokens: int
     recent_history_tokens: int
     enabled_tools: list[str]
+    router_model: str
 
     @classmethod
     def load(cls) -> "Config":
@@ -80,4 +81,5 @@ class Config:
             max_history_tokens=max_history_tokens,
             recent_history_tokens=recent_history_tokens,
             enabled_tools=_split_names(os.environ.get("ENABLED_TOOLS", "")),
+            router_model=os.environ.get("ROUTER_MODEL", "").strip(),
         )

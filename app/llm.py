@@ -41,6 +41,7 @@ class LLMClient(Protocol):
         tools: list[Tool] | None = None,
         context: ToolContext | None = None,
         on_tool_call: OnToolCall | None = None,
+        think: bool = False,
     ) -> str: ...  # pragma: no cover
 
 
@@ -67,23 +68,28 @@ async def _run_with_tools(
     tools: list[Tool] | None,
     context: ToolContext | None = None,
     on_tool_call: OnToolCall | None = None,
+    think: bool = False,
 ) -> str:
     """Drive an OpenAI-style tool-calling loop shared by both backends.
 
     `complete` sends one request and returns the raw assistant message dict
     (`content`, and optionally `tool_calls`) — Ollama's /api/chat and any
     OpenAI-compatible /chat/completions endpoint both speak this same
-    tool-calling shape, so one loop covers both.
+    tool-calling shape, so one loop covers both. `think` is decided once,
+    upfront, by app.router (if configured) — see its module docstring for
+    why that's a separate classification call rather than a self-invoked
+    tool (app.tools.think_harder exists for backends/agents without a
+    router configured, and keeps working independently of this).
     """
     if not tools:
-        message = await complete(messages, None)
+        message = await complete(messages, None, think)
         return message.get("content") or ""
 
     tools_by_name = {tool.name: tool for tool in tools}
     conversation = list(messages)
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         offer_tools = round_index < MAX_TOOL_ROUNDS
-        message = await complete(conversation, tools if offer_tools else None, False)
+        message = await complete(conversation, tools if offer_tools else None, think)
         calls: list[ToolCall] = message.get("tool_calls") or []
         if not calls:
             return message.get("content") or ""
@@ -175,6 +181,7 @@ class OllamaClient:
         tools: list[Tool] | None = None,
         context: ToolContext | None = None,
         on_tool_call: OnToolCall | None = None,
+        think: bool = False,
     ) -> str:
         async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
             payload: dict[str, Any] = {"model": self.model, "messages": msgs, "stream": False}
@@ -185,7 +192,7 @@ class OllamaClient:
             data = await _post_json(f"{self.base_url}/api/chat", payload, headers=None, timeout=self.TIMEOUT)
             return data["message"]
 
-        return await _run_with_tools(complete, messages, tools, context, on_tool_call)
+        return await _run_with_tools(complete, messages, tools, context, on_tool_call, think)
 
 
 class CloudClient:
@@ -202,10 +209,13 @@ class CloudClient:
         tools: list[Tool] | None = None,
         context: ToolContext | None = None,
         on_tool_call: OnToolCall | None = None,
+        think: bool = False,
     ) -> str:
         async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
             # No standard OpenAI-compatible equivalent to Ollama's `think` —
-            # think_harder still "works" here, it just re-asks plainly.
+            # think_harder still "works" here, it just re-asks plainly, and
+            # app.router is Ollama-only (see its docstring), so `think`
+            # reaching here at all would already require a custom setup.
             payload: dict[str, Any] = {"model": self.model, "messages": msgs}
             if offered_tools:
                 payload["tools"] = [tool.schema() for tool in offered_tools]
@@ -218,7 +228,7 @@ class CloudClient:
             )
             return data["choices"][0]["message"]
 
-        return await _run_with_tools(complete, messages, tools, context, on_tool_call)
+        return await _run_with_tools(complete, messages, tools, context, on_tool_call, think)
 
 
 def build_llm_client(config: Config) -> LLMClient:

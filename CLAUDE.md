@@ -85,6 +85,9 @@ required.
   in the container Compose already injects them) into a single dataclass,
   validates `LLM_BACKEND` is `ollama`/`cloud`, and resolves the
   `{{AGENT_NAME}}` placeholder in the system prompt at load time.
+  `router_model` (`ROUTER_MODEL` env var, empty by default) is read
+  unconditionally regardless of backend — it's `app/main.py`, not this
+  file, that decides whether it actually gets used (see `router.py` below).
 - `llm.py` — `LLMClient` Protocol with `OllamaClient` and `CloudClient`
   (any OpenAI-compatible `/chat/completions` endpoint); `build_llm_client()`
   picks one from `Config.llm_backend`. Both are thin `httpx` wrappers (via
@@ -101,7 +104,40 @@ required.
   (tools are sync, may block on network I/O) and never lets a tool's
   exception escape to the model — it becomes a `"...tool failed to run"`
   message instead, same philosophy as the rest of the bot: a broken
-  side-capability shouldn't break the conversation.
+  side-capability shouldn't break the conversation. `chat()` also takes a
+  `think: bool = False` kwarg, threaded through `_run_with_tools()` into
+  every `complete()` call for that reply (both the no-tools branch and each
+  round of the tool-calling loop) — this is what `router.py` below flips on
+  per-message. `CloudClient`'s `complete()` closure ignores it; there's no
+  OpenAI-compatible equivalent. This is separate from `_with_think_harder()`,
+  which still always forces `think=True` for the self-invoked
+  `think_harder` tool's own re-ask, independent of the router.
+- `router.py` — `OllamaRouter.classify(text) -> bool` is a small, separate
+  classification call, made before every reply on the `ollama` backend when
+  `Config.router_model` is set, that decides THINK/NO_THINK directly and
+  feeds the result into `chat(..., think=...)` above. This exists because
+  `think_harder` (the self-invoked tool, below) turned out to be an
+  unreliable mechanism in practice — it stayed silent even on messages
+  explicitly asking to "think carefully" — while asking a model to classify
+  the message directly is a much stronger signal. `evals/router_bench.py` +
+  `evals/router_dataset.py` (a labeled, multilingual,
+  adversarial-in-both-directions dataset) benchmarked nine Ollama models
+  against this exact question before `evals/ROUTER_FINDINGS.md` settled on
+  a prompt/schema; `router_bench.py` imports `ROUTER_SYSTEM_PROMPT` and
+  `parse_label` from this module rather than duplicating them, so that
+  benchmark measures exactly what production runs, not a copy that could
+  drift from it. `classify()` uses Ollama's structured-output `format`
+  (a JSON schema constraining the next token to the enum, not a free-text
+  "reply with one word" instruction some models otherwise ramble past
+  indefinitely) and fails open — any network error, non-2xx response, or
+  unparseable label logs a warning and returns `False` — since a broken
+  router must never block a reply, only skip the speed-up it would have
+  bought. It classifies only the latest user message directly via its own
+  `httpx.AsyncClient`, independent of `_post_json()`. Router and principal
+  model share the same Ollama instance's VRAM, so picking a router model is
+  a hardware-fit question as much as an accuracy one — see
+  `evals/ROUTER_FINDINGS.md` for why the template's own reference
+  deployment ended up using the same model for both.
 - `tools/` — the catalog of capabilities an agent *can* use, entirely
   separate from which ones it *does*: nothing here is wired into an agent by
   default. `tools/base.py` defines `Tool` (name, description, JSON-schema
@@ -179,7 +215,11 @@ required.
   `Tool.execute` is sync but `complete()` is async, the callback bridges
   with a fresh `asyncio.run()` inside the worker thread `_call_tool()`
   already runs tools in via `asyncio.to_thread` — safe since that thread
-  has no event loop of its own to conflict with.
+  has no event loop of its own to conflict with. This self-invoked path is
+  what `router.py`'s `OllamaRouter` above exists to route around — an agent
+  with `ROUTER_MODEL` set doesn't need the model to reach for this tool at
+  all, since `bot.py` decides `think` up front instead. `think_harder` stays
+  in the catalog either way (harmless, if redundant, alongside a router).
 
   Every tool call is also announced to the chat right before it runs
   (`bot.py`'s `_make_on_tool_call()`, threaded into `_run_with_tools()` as
@@ -194,7 +234,17 @@ required.
   formatter raises (a model sending an odd argument type must not take the
   whole reply down with it); a tool with no entry there still gets a
   generic `"🔧 Using {name}..."` message rather than silence.
-- `bot.py` — `build_application()` wires `python-telegram-bot` handlers.
+- `bot.py` — `build_application(config, llm_client, router=None)` wires
+  `python-telegram-bot` handlers; `router` is an optional `OllamaRouter`
+  (see `router.py` above), constructed once in `app/main.py` and threaded
+  through, not built per-message. Inside `_reply_to()`, right after history
+  is trimmed and before tools are resolved, `think = await
+  router.classify(text) if router else False` — a router-less agent (the
+  default) always passes `think=False`, the same as before the router
+  existed. When it comes back `True`, the chat gets a
+  `TOOL_CALL_LABELS["think_harder"]` notice (reused rather than a
+  duplicate string) before the LLM call, and `think=think` is passed to
+  `llm_client.chat()` in both the tools and no-tools branches.
   Conversation history is an in-memory `dict[chat_id, list[message]]` closed
   over inside `build_application` (lost on restart), not a module-level or
   persisted store — alongside a second `dict[chat_id, str]` holding each
