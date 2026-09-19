@@ -413,7 +413,8 @@ def build_application(config: Config, llm_client: LLMClient, router: OllamaRoute
                 await update.message.reply_text("Something went wrong talking to the model. Please try again.")
                 return
 
-            if not reply.strip():
+            reply_was_empty = not reply.strip()
+            if reply_was_empty:
                 logger.warning("LLM returned an empty reply; substituting a fallback message")
                 reply = EMPTY_REPLY_FALLBACK
         finally:
@@ -422,7 +423,17 @@ def build_application(config: Config, llm_client: LLMClient, router: OllamaRoute
                 await typing_task
 
         histories[chat_id] = history
-        history.append({"role": "assistant", "content": reply})
+        if not reply_was_empty:
+            # Never save the fallback text itself into history: seen live,
+            # once it's in context a few times, a small model gets even
+            # more likely to answer with nothing on the *next* turn too —
+            # a short, generic, repeated phrase is exactly the kind of
+            # pattern that nudges a weak model toward repeating it instead
+            # of generating a real answer, compounding turn over turn.
+            # Leaving the user's message as the last entry (unanswered, as
+            # far as history is concerned) is safe: chat APIs don't require
+            # strict role alternation.
+            history.append({"role": "assistant", "content": reply})
         await _send_formatted_reply(update, reply)
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

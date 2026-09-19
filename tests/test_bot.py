@@ -641,6 +641,29 @@ async def test_handle_message_falls_back_when_llm_returns_an_empty_reply(caplog)
     assert "empty reply" in caplog.text.lower()
 
 
+async def test_handle_message_never_saves_the_empty_reply_fallback_to_history():
+    # Caught live against Billy: once EMPTY_REPLY_FALLBACK's short, generic
+    # text landed in history a couple of times, a small model got more and
+    # more likely to answer with nothing on the *next* turn too — a
+    # feedback loop. The fallback must reach the user for that turn only,
+    # never the conversation the model sees afterwards.
+    config = make_config()
+    llm_client, calls = make_recording_llm_client(["", "second"])
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    await handle_message(make_update(text="one"), make_context())
+    await handle_message(make_update(text="two"), make_context())
+
+    second_call_messages = calls[1]
+    contents = [m["content"] for m in second_call_messages]
+    assert EMPTY_REPLY_FALLBACK not in contents
+    roles_and_content = [(m["role"], m["content"]) for m in second_call_messages]
+    assert ("user", "one") in roles_and_content
+    assert ("user", "two") in roles_and_content
+    assert ("assistant", EMPTY_REPLY_FALLBACK) not in roles_and_content
+
+
 async def test_handle_message_sends_typing_action_while_waiting():
     config = make_config()
     llm_client = AsyncMock()
