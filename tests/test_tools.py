@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 
 from app.tools import AVAILABLE_TOOLS, resolve_tools
@@ -63,16 +65,18 @@ FAKE_RESULTS_PAGE = """
 
 
 class FakeResponse:
-    def __init__(self, text):
+    def __init__(self, text, status_code=200):
         self.text = text
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
 
 
 class FakeSyncClient:
-    def __init__(self, page):
+    def __init__(self, page, status_code=200):
         self._page = page
+        self._status_code = status_code
         self.posted_with = None
 
     def __enter__(self):
@@ -83,11 +87,11 @@ class FakeSyncClient:
 
     def post(self, url, data=None):
         self.posted_with = (url, data)
-        return FakeResponse(self._page)
+        return FakeResponse(self._page, self._status_code)
 
 
-def patch_client(monkeypatch, page):
-    fake = FakeSyncClient(page)
+def patch_client(monkeypatch, page, status_code=200):
+    fake = FakeSyncClient(page, status_code)
     monkeypatch.setattr("app.tools.web_search.httpx.Client", lambda **kwargs: fake)
     return fake
 
@@ -150,6 +154,46 @@ def test_search_web_reports_when_the_request_fails(monkeypatch):
     result = search_web("example query")
 
     assert "no results" in result.lower()
+
+
+def test_search_web_retries_once_after_a_202_and_succeeds(monkeypatch):
+    # 202 is DuckDuckGo's own soft rate-limit signal, not an httpx error —
+    # raise_for_status() never trips on it, so it has to be checked for
+    # explicitly to avoid reporting a burst-triggered soft block as if
+    # nothing were found at all.
+    monkeypatch.setattr("app.tools.web_search.time.sleep", lambda seconds: None)
+    calls = {"count": 0}
+
+    class FlakyClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, url, data=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return FakeResponse("<html>rate limited</html>", status_code=202)
+            return FakeResponse(FAKE_RESULTS_PAGE, status_code=200)
+
+    monkeypatch.setattr("app.tools.web_search.httpx.Client", lambda **kwargs: FlakyClient())
+
+    result = search_web("example query")
+
+    assert calls["count"] == 2
+    assert "Example One" in result
+
+
+def test_search_web_gives_up_after_repeated_202s(monkeypatch, caplog):
+    monkeypatch.setattr("app.tools.web_search.time.sleep", lambda seconds: None)
+    patch_client(monkeypatch, "<html>rate limited</html>", status_code=202)
+
+    with caplog.at_level(logging.WARNING, logger="app.tools.web_search"):
+        result = search_web("example query")
+
+    assert "no results" in result.lower()
+    assert "rate-limited" in caplog.text.lower()
 
 
 def test_search_web_normalizes_protocol_less_urls(monkeypatch):

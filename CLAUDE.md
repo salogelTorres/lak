@@ -154,7 +154,17 @@ required.
   `web_search.py` hits DuckDuckGo's HTML endpoint directly (no API key, no
   extra dependency) and redacts anything in a result that looks like a
   prompt-injection attempt before it ever reaches the model — a search
-  result is untrusted content. `fetch_page.py` complements it for deeper
+  result is untrusted content. `_fetch_search_page()` retries once, after a
+  short backoff, on a `202` response — DuckDuckGo's own soft signal for
+  traffic it's decided looks automated, not an `httpx` error, so
+  `raise_for_status()` never trips on it and it has to be checked for
+  explicitly. Seen live: a message asking about several topics at once
+  fires several `search_web` calls back to back with no delay between
+  them, which is exactly the kind of burst that trips it — without this
+  retry, every search in that burst (and often the next few messages
+  after it) would silently come back "no results," and the model would
+  honestly but wrongly tell the user it found nothing, rather than that
+  the search engine itself was rate-limiting the bot. `fetch_page.py` complements it for deeper
   research: the model can fetch a specific URL (typically one `search_web`
   just returned) and read its full text instead of a snippet, truncated to
   `MAX_CHARS` so one page can't dominate the context budget. Both tools

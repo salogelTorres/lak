@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 import httpx
 
@@ -28,15 +29,35 @@ _SNIPPET_RE = re.compile(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)>', re.
 _AD_MARKER = "duckduckgo.com/y.js"
 
 
+# DuckDuckGo's own soft signal for traffic it's decided looks automated:
+# a 2xx status (so raise_for_status never trips) with a challenge page that
+# parses to zero results — indistinguishable from "genuinely nothing
+# found" unless checked for specifically. A burst of tool calls in one
+# reply (several topics asked about at once) is exactly the kind of
+# traffic likely to trip it. One retry after a short backoff is enough to
+# ride out a soft block without falsely telling the model nothing exists.
+_RATE_LIMITED_STATUS = 202
+_RATE_LIMIT_BACKOFF_SECONDS = 2.0
+_MAX_ATTEMPTS = 2  # the original request, plus one retry after a backoff
+
+
 def _fetch_search_page(query: str) -> str:
-    try:
-        with httpx.Client(timeout=15.0, follow_redirects=True, headers=HEADERS) as client:
-            response = client.post(DUCKDUCKGO_HTML_URL, data={"q": query})
-            response.raise_for_status()
-            return response.text
-    except httpx.HTTPError:
-        logger.warning("DuckDuckGo request failed", exc_info=True)
-        return ""
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            with httpx.Client(timeout=15.0, follow_redirects=True, headers=HEADERS) as client:
+                response = client.post(DUCKDUCKGO_HTML_URL, data={"q": query})
+        except httpx.HTTPError:
+            logger.warning("DuckDuckGo request failed", exc_info=True)
+            return ""
+
+        is_last_attempt = attempt == _MAX_ATTEMPTS - 1
+        if response.status_code == _RATE_LIMITED_STATUS and not is_last_attempt:
+            logger.warning("DuckDuckGo returned %s (likely rate-limited); retrying once", response.status_code)
+            time.sleep(_RATE_LIMIT_BACKOFF_SECONDS)
+            continue
+
+        response.raise_for_status()
+        return response.text
 
 
 def _extract_results(page: str, max_results: int) -> list[dict[str, str]]:
