@@ -170,7 +170,28 @@ async def _call_tool(tools_by_name: dict[str, Tool], call: ToolCall, context: To
     return {"role": "tool", "tool_call_id": call_id, "content": str(result)}
 
 
-class OllamaClient:
+class _BaseLLMClient:
+    """Shares the one `chat()` wrapper both backends need — parse the
+    Protocol's signature once and hand `complete` (each backend's own
+    request-shaping coroutine) to `_run_with_tools`. A subclass only ever
+    needs to define `_complete`.
+    """
+
+    async def _complete(self, msgs: list[Message], offered_tools: list[Tool] | None, think: bool) -> Message:
+        raise NotImplementedError  # pragma: no cover
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: list[Tool] | None = None,
+        context: ToolContext | None = None,
+        on_tool_call: OnToolCall | None = None,
+        think: bool = False,
+    ) -> str:
+        return await _run_with_tools(self._complete, messages, tools, context, on_tool_call, think)
+
+
+class OllamaClient(_BaseLLMClient):
     # A cold model (nothing loaded into memory/VRAM yet, e.g. right after
     # `docker compose up`) can take a minute or more just to load before it
     # generates a single token, on top of generation time itself — a short
@@ -182,27 +203,17 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def chat(
-        self,
-        messages: list[Message],
-        tools: list[Tool] | None = None,
-        context: ToolContext | None = None,
-        on_tool_call: OnToolCall | None = None,
-        think: bool = False,
-    ) -> str:
-        async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
-            payload: dict[str, Any] = {"model": self.model, "messages": msgs, "stream": False}
-            if offered_tools:
-                payload["tools"] = [tool.schema() for tool in offered_tools]
-            if think:
-                payload["think"] = True
-            data = await _post_json(f"{self.base_url}/api/chat", payload, headers=None, timeout=self.TIMEOUT)
-            return data["message"]
-
-        return await _run_with_tools(complete, messages, tools, context, on_tool_call, think)
+    async def _complete(self, msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
+        payload: dict[str, Any] = {"model": self.model, "messages": msgs, "stream": False}
+        if offered_tools:
+            payload["tools"] = [tool.schema() for tool in offered_tools]
+        if think:
+            payload["think"] = True
+        data = await _post_json(f"{self.base_url}/api/chat", payload, headers=None, timeout=self.TIMEOUT)
+        return data["message"]
 
 
-class CloudClient:
+class CloudClient(_BaseLLMClient):
     """Talks to any OpenAI-compatible /chat/completions endpoint."""
 
     def __init__(self, base_url: str, api_key: str, model: str) -> None:
@@ -210,32 +221,22 @@ class CloudClient:
         self.api_key = api_key
         self.model = model
 
-    async def chat(
-        self,
-        messages: list[Message],
-        tools: list[Tool] | None = None,
-        context: ToolContext | None = None,
-        on_tool_call: OnToolCall | None = None,
-        think: bool = False,
-    ) -> str:
-        async def complete(msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
-            # No standard OpenAI-compatible equivalent to Ollama's `think` —
-            # think_harder still "works" here, it just re-asks plainly, and
-            # app.router is Ollama-only (see its docstring), so `think`
-            # reaching here at all would already require a custom setup.
-            payload: dict[str, Any] = {"model": self.model, "messages": msgs}
-            if offered_tools:
-                payload["tools"] = [tool.schema() for tool in offered_tools]
-                payload["tool_choice"] = "auto"
-            data = await _post_json(
-                f"{self.base_url}/chat/completions",
-                payload,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=120,
-            )
-            return data["choices"][0]["message"]
-
-        return await _run_with_tools(complete, messages, tools, context, on_tool_call, think)
+    async def _complete(self, msgs: list[Message], offered_tools: list[Tool] | None, think: bool = False) -> Message:
+        # No standard OpenAI-compatible equivalent to Ollama's `think` —
+        # think_harder still "works" here, it just re-asks plainly, and
+        # app.router is Ollama-only (see its docstring), so `think`
+        # reaching here at all would already require a custom setup.
+        payload: dict[str, Any] = {"model": self.model, "messages": msgs}
+        if offered_tools:
+            payload["tools"] = [tool.schema() for tool in offered_tools]
+            payload["tool_choice"] = "auto"
+        data = await _post_json(
+            f"{self.base_url}/chat/completions",
+            payload,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=120,
+        )
+        return data["choices"][0]["message"]
 
 
 def build_llm_client(config: Config) -> LLMClient:

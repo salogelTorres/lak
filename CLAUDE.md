@@ -91,10 +91,11 @@ required.
 - `llm.py` — `LLMClient` Protocol with `OllamaClient` and `CloudClient`
   (any OpenAI-compatible `/chat/completions` endpoint); `build_llm_client()`
   picks one from `Config.llm_backend`. Both are thin `httpx` wrappers (via
-  the shared `_post_json()` helper) with no retry/streaming logic. Each
-  implements `chat()` as a thin per-backend `complete()` closure (shapes its
-  own request payload/endpoint) handed to the shared `_run_with_tools()`
-  loop, which is what actually knows how to run tool calls — up to
+  the shared `_post_json()` helper) with no retry/streaming logic, and both
+  subclass `_BaseLLMClient`, whose one `chat()` hands each subclass's own
+  `_complete()` (shapes its own request payload/endpoint) to the shared
+  `_run_with_tools()` loop, which is what actually knows how to run tool
+  calls — up to
   `MAX_TOOL_ROUNDS` rounds, forcing a final tools-withheld round so a model
   that won't stop requesting tools can't loop forever. Ollama's `/api/chat`
   and OpenAI-compatible `/chat/completions` both speak the same
@@ -106,9 +107,9 @@ required.
   message instead, same philosophy as the rest of the bot: a broken
   side-capability shouldn't break the conversation. `chat()` also takes a
   `think: bool = False` kwarg, threaded through `_run_with_tools()` into
-  every `complete()` call for that reply (both the no-tools branch and each
-  round of the tool-calling loop) — this is what `router.py` below flips on
-  per-message. `CloudClient`'s `complete()` closure ignores it; there's no
+  every `_complete()` call for that reply (both the no-tools branch and
+  each round of the tool-calling loop) — this is what `router.py` below
+  flips on per-message. `CloudClient._complete()` ignores it; there's no
   OpenAI-compatible equivalent. This is separate from `_with_think_harder()`,
   which still always forces `think=True` for the self-invoked
   `think_harder` tool's own re-ask, independent of the router.
