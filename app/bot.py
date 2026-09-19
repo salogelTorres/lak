@@ -38,6 +38,16 @@ VOICE_TRANSCRIPTION_PREFIX = "[Voice message, transcribed by Whisper]"
 
 COMPACTING_NOTICE = "One moment — compacting older conversation history to keep things running smoothly..."
 
+# Telegram's sendMessage rejects an empty string outright (BadRequest:
+# "Message text is empty"), and _send_formatted_reply's own no-parse-mode
+# fallback would hit the exact same wall since it's the same empty text —
+# so an empty reply needs this substitute before it ever reaches Telegram,
+# not a second send attempt. Seen in practice: a model that spent every
+# available tool round (MAX_TOOL_ROUNDS) still trying to call more tools,
+# then had to answer in the final, tools-withheld round and produced
+# nothing at all.
+EMPTY_REPLY_FALLBACK = "I don't have a good answer for that — could you try rephrasing?"
+
 COMPACTION_SYSTEM_PROMPT = (
     "You are compacting the history of an ongoing conversation between a user and an "
     "assistant, to save space. Write a concise summary that preserves important facts, "
@@ -402,6 +412,10 @@ def build_application(config: Config, llm_client: LLMClient, router: OllamaRoute
                 logger.exception("Failed calling the LLM")
                 await update.message.reply_text("Something went wrong talking to the model. Please try again.")
                 return
+
+            if not reply.strip():
+                logger.warning("LLM returned an empty reply; substituting a fallback message")
+                reply = EMPTY_REPLY_FALLBACK
         finally:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

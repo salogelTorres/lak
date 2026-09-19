@@ -12,6 +12,7 @@ import app.bot as bot_module
 from app.bot import (
     COMPACTING_NOTICE,
     COMPACTION_SYSTEM_PROMPT,
+    EMPTY_REPLY_FALLBACK,
     TOOL_CALL_LABELS,
     VOICE_TRANSCRIPTION_PREFIX,
     _build_system_message,
@@ -618,6 +619,26 @@ async def test_handle_message_reports_llm_error():
     update.message.reply_text.assert_awaited_once_with(
         "Something went wrong talking to the model. Please try again."
     )
+
+
+async def test_handle_message_falls_back_when_llm_returns_an_empty_reply(caplog):
+    # Telegram's sendMessage rejects an empty string outright, and it's the
+    # same empty text either way, so the no-parse-mode retry in
+    # _send_formatted_reply can't save it — seen in practice when a model
+    # burns every tool round still trying to call more tools and answers
+    # with nothing in the final, tools-withheld round.
+    config = make_config()
+    llm_client = AsyncMock()
+    llm_client.chat.return_value = ""
+    app = build_application(config, llm_client)
+    _, handle_message = get_handlers(app)
+
+    update = make_update()
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await handle_message(update, make_context())
+
+    update.message.reply_text.assert_awaited_once_with(EMPTY_REPLY_FALLBACK, parse_mode=ParseMode.MARKDOWN)
+    assert "empty reply" in caplog.text.lower()
 
 
 async def test_handle_message_sends_typing_action_while_waiting():

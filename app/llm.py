@@ -22,9 +22,16 @@ ToolCall = dict[str, Any]
 
 # Bounded so a model that keeps requesting tools indefinitely can't loop
 # forever — one final round always runs with tools withheld, forcing a
-# plain-text answer. High enough that a search-then-read-a-few-pages research
-# chain (search_web, then a couple of fetch_page calls) can actually finish.
-MAX_TOOL_ROUNDS = 6
+# plain-text answer. 6 wasn't enough in practice: a message asking about
+# several unrelated topics at once (e.g. "search these 5 things for me")
+# reasonably wants one search_web call per topic, plus the odd retry with a
+# reworded query, before it's even ready to start reading pages or
+# synthesizing — it ran out of rounds and hit the forced tools-withheld one
+# still mid-research, answering with nothing (see EMPTY_REPLY_FALLBACK in
+# app/bot.py for the safety net either way). High enough for a handful of
+# topics each with their own search-then-read-a-few-pages chain to actually
+# finish, not just a single one.
+MAX_TOOL_ROUNDS = 12
 
 
 # Notified with a tool's name and parsed arguments right before it runs, so
